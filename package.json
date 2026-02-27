@@ -1,0 +1,15 @@
+{
+  "name": "ralph-platform",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:dashboard": "npm run -w @ralph/dashboard dev --",
+    "start:dashboard": "npm run -w @ralph/dashboard start --",
+    "lint": "npm run lint --workspaces --if-present"
+  }
+}

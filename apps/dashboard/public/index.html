@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ralph Dashboard</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --surface: #141b2d;
+        --surface-2: #1b243a;
+        --ink: #e5e7eb;
+        --muted: #9ca3af;
+        --good: #22c55e;
+        --warn: #f59e0b;
+        --bad: #ef4444;
+        --accent: #38bdf8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 20% 10%, #1f2a44, var(--bg));
+        color: var(--ink);
+      }
+      header {
+        padding: 20px;
+        border-bottom: 1px solid #23304d;
+        background: rgba(10, 14, 28, 0.7);
+        backdrop-filter: blur(6px);
+        position: sticky;
+        top: 0;
+        z-index: 3;
+      }
+      h1 { margin: 0; font-size: 22px; }
+      .muted { color: var(--muted); font-size: 13px; }
+      main {
+        padding: 20px;
+        display: grid;
+        gap: 18px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+      }
+      .card {
+        background: linear-gradient(160deg, var(--surface), var(--surface-2));
+        border: 1px solid #253252;
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .card h3 { margin: 0 0 8px 0; font-size: 15px; }
+      .stat { font-size: 30px; font-weight: 700; }
+      .pill {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .pill.running { background: #1e3a8a; color: #93c5fd; }
+      .pill.done { background: #14532d; color: #86efac; }
+      .pill.idle { background: #374151; color: #d1d5db; }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th, td {
+        border-bottom: 1px solid #2a3655;
+        text-align: left;
+        padding: 8px;
+        vertical-align: top;
+      }
+      th { color: #cbd5e1; font-weight: 600; }
+      .files { max-height: 70px; overflow: auto; white-space: pre-wrap; }
+      .dag-wrap {
+        overflow: auto;
+        border: 1px solid #253252;
+        border-radius: 12px;
+        background: #0b1326;
+      }
+      svg { min-width: 900px; width: 100%; height: 320px; display: block; }
+      .node-label { fill: #e5e7eb; font-size: 11px; text-anchor: middle; }
+      .repo-node { fill: #334155; stroke: #64748b; }
+      .turn-node { fill: #1d4ed8; stroke: #60a5fa; }
+      .audit-node { fill: #5b21b6; stroke: #a78bfa; }
+      .edge { stroke: #64748b; stroke-width: 1.5; marker-end: url(#arrow); }
+      .axis-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 8px;
+      }
+      .axis-item {
+        border: 1px solid #2a3655;
+        border-radius: 10px;
+        padding: 8px;
+        font-size: 12px;
+      }
+      .axis-score { font-weight: 700; font-size: 16px; margin-top: 4px; }
+      @media (max-width: 700px) {
+        .stat { font-size: 24px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Ralph Platform Dashboard</h1>
+      <div id="repoLine" class="muted">Loading...</div>
+    </header>
+    <main>
+      <section class="grid" id="summaryCards"></section>
+
+      <section class="card">
+        <h3>Run History</h3>
+        <div id="runHistory"></div>
+      </section>
+
+      <section class="card">
+        <h3>Execution DAG</h3>
+        <div class="dag-wrap">
+          <svg id="dagSvg" viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Latest Audit Axes</h3>
+        <div class="axis-grid" id="axisGrid"></div>
+      </section>
+
+      <section class="card">
+        <h3>Turns</h3>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr><th>Turn</th><th>Test</th><th>Untested</th><th>Done</th><th>Changed Files</th></tr>
+            </thead>
+            <tbody id="turnRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Audits</h3>
+        <div style="overflow:auto">
+          <table>
+            <thead>
+              <tr><th>Turn</th><th>Verdict</th><th>Score</th><th>Confidence</th><th>Axis Issues</th></tr>
+            </thead>
+            <tbody id="auditRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      let latestState = null;
+
+      function scoreColor(score) {
+        if (typeof score !== "number") return "var(--muted)";
+        if (score >= 9.2) return "var(--good)";
+        if (score >= 8.5) return "var(--warn)";
+        return "var(--bad)";
+      }
+
+      function safeText(value) {
+        if (value === undefined || value === null) return "";
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;");
+      }
+
+      function renderSummary(state) {
+        const cards = document.getElementById("summaryCards");
+        const m = state.snapshot.metrics;
+        cards.innerHTML = `
+          <div class="card"><h3>Turns</h3><div class="stat">${m.turnCount}</div></div>
+          <div class="card"><h3>Audits</h3><div class="stat">${m.auditCount}</div></div>
+          <div class="card"><h3>Latest Turn</h3><div class="stat">${m.latestTurn ?? "-"}</div></div>
+          <div class="card"><h3>Latest Audit Score</h3><div class="stat" style="color:${scoreColor(m.latestAuditScore)}">${m.latestAuditScore ?? "-"}</div></div>
+          <div class="card"><h3>Done Detected</h3><div class="stat" style="font-size:22px">${m.doneDetected ? "YES" : "NO"}</div></div>
+        `;
+
+        const repo = state.snapshot.repo;
+        document.getElementById("repoLine").textContent = `${state.snapshot.targetRepo} | git=${repo.hasGit ? "yes" : "no"}${repo.gitBranch ? ` | branch=${repo.gitBranch}` : ""}${repo.dirty === undefined ? "" : ` | dirty=${repo.dirty}`}`;
+      }
+
+      function renderRunHistory(state) {
+        const wrap = document.getElementById("runHistory");
+        const runs = state.history || [];
+        if (runs.length === 0) {
+          wrap.innerHTML = '<div class="muted">No runs detected yet.</div>';
+          return;
+        }
+
+        wrap.innerHTML = `<div class="grid">${runs.map((run) => `
+          <div class="card">
+            <div><strong>${safeText(run.id)}</strong></div>
+            <div class="muted">started ${safeText(run.startedAt)}</div>
+            <div class="muted">updated ${safeText(run.updatedAt)}</div>
+            <div style="margin-top:8px"><span class="pill ${run.status}">${safeText(run.status)}</span></div>
+            <div class="muted" style="margin-top:6px">turn ${safeText(run.latestTurn ?? "-")} | score ${safeText(run.latestAuditScore ?? "-")}</div>
+          </div>
+        `).join("")}</div>`;
+      }
+
+      function renderTurns(state) {
+        const body = document.getElementById("turnRows");
+        const rows = state.snapshot.turns || [];
+        body.innerHTML = rows
+          .map((turn) => `
+            <tr>
+              <td>${turn.turn}</td>
+              <td>${safeText(turn.testStatus ?? "-")}</td>
+              <td>${safeText(turn.untestedScope ?? "-")}</td>
+              <td>${turn.stopTokenSeen ? "yes" : "no"}</td>
+              <td><div class="files">${safeText((turn.changedFiles || []).join("\n"))}</div></td>
+            </tr>
+          `)
+          .join("");
+      }
+
+      function renderAudits(state) {
+        const body = document.getElementById("auditRows");
+        const rows = state.snapshot.audits || [];
+        body.innerHTML = rows
+          .map((audit) => `
+            <tr>
+              <td>${audit.turn}</td>
+              <td>${safeText(audit.verdict ?? "-")}</td>
+              <td style="color:${scoreColor(audit.score)}">${safeText(audit.score ?? "-")}</td>
+              <td>${safeText(audit.confidence ?? "-")}</td>
+              <td>${safeText(audit.thresholdIssues ?? "-")}</td>
+            </tr>
+          `)
+          .join("");
+      }
+
+      function renderAxes(state) {
+        const grid = document.getElementById("axisGrid");
+        const latestAudit = (state.snapshot.audits || []).slice().sort((a, b) => b.turn - a.turn)[0];
+        if (!latestAudit || !latestAudit.axisScores) {
+          grid.innerHTML = '<div class="muted">No axis scores yet.</div>';
+          return;
+        }
+
+        const entries = Object.entries(latestAudit.axisScores);
+        grid.innerHTML = entries.map(([axis, score]) => `
+          <div class="axis-item">
+            <div>${safeText(axis)}</div>
+            <div class="axis-score" style="color:${scoreColor(score)}">${safeText(score)}</div>
+          </div>
+        `).join("");
+      }
+
+      function renderDag(state) {
+        const svg = document.getElementById("dagSvg");
+        const nodes = state.snapshot.nodes || [];
+        const edges = state.snapshot.edges || [];
+
+        if (!nodes.length) {
+          svg.innerHTML = "";
+          return;
+        }
+
+        const turnNodes = nodes.filter((node) => node.kind === "turn").sort((a, b) => Number(a.id.split("-")[1]) - Number(b.id.split("-")[1]));
+        const positions = {};
+        positions.repo = { x: 70, y: 160 };
+        turnNodes.forEach((node, index) => {
+          const x = 220 + index * 180;
+          positions[node.id] = { x, y: 90 };
+          const auditId = `audit-${node.id.split("-")[1]}`;
+          positions[auditId] = { x, y: 240 };
+        });
+
+        const maxX = Math.max(...Object.values(positions).map((p) => p.x)) + 120;
+        svg.setAttribute("viewBox", `0 0 ${Math.max(maxX, 900)} 320`);
+
+        const defs = `
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+            </marker>
+          </defs>
+        `;
+
+        const edgeLines = edges.map((edge) => {
+          const from = positions[edge.from];
+          const to = positions[edge.to];
+          if (!from || !to) return "";
+          return `<line class="edge" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" />`;
+        }).join("");
+
+        const nodeShapes = nodes.map((node) => {
+          const p = positions[node.id];
+          if (!p) return "";
+          const cls = node.kind === "repo" ? "repo-node" : node.kind === "audit" ? "audit-node" : "turn-node";
+          return `
+            <g>
+              <circle class="${cls}" cx="${p.x}" cy="${p.y}" r="22"></circle>
+              <text class="node-label" x="${p.x}" y="${p.y + 4}">${safeText(node.label)}</text>
+            </g>
+          `;
+        }).join("");
+
+        svg.innerHTML = defs + edgeLines + nodeShapes;
+      }
+
+      function render(state) {
+        latestState = state;
+        renderSummary(state);
+        renderRunHistory(state);
+        renderTurns(state);
+        renderAudits(state);
+        renderAxes(state);
+        renderDag(state);
+      }
+
+      async function fetchState() {
+        const res = await fetch("/api/state");
+        const json = await res.json();
+        render(json);
+      }
+
+      function initWebSocket() {
+        const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+        ws.onmessage = (event) => {
+          const payload = JSON.parse(event.data);
+          if (payload.type === "state") {
+            render(payload.data);
+          }
+        };
+        ws.onclose = () => {
+          setTimeout(initWebSocket, 2000);
+        };
+      }
+
+      fetchState().catch(() => {});
+      setInterval(() => {
+        if (!latestState) fetchState().catch(() => {});
+      }, 3000);
+      initWebSocket();
+    </script>
+  </body>
+</html>
