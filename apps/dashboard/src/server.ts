@@ -15,6 +15,8 @@ interface RunCard {
   updatedAt: string;
   latestTurn?: number;
   latestAuditScore?: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
   doneDetected: boolean;
   status: "running" | "done" | "idle";
 }
@@ -33,6 +35,10 @@ function getArg(name: string): string | undefined {
 const targetRepo = getArg("--target") ?? process.env.TARGET_REPO ?? process.cwd();
 const port = Number.parseInt(getArg("--port") ?? process.env.PORT ?? "4310", 10);
 const pollMs = Number.parseInt(getArg("--poll-ms") ?? process.env.POLL_MS ?? "2000", 10);
+const mainInputCostPer1M = Number.parseFloat(getArg("--main-input-cost-per-1m") ?? process.env.MAIN_INPUT_COST_PER_1M ?? "");
+const mainOutputCostPer1M = Number.parseFloat(getArg("--main-output-cost-per-1m") ?? process.env.MAIN_OUTPUT_COST_PER_1M ?? "");
+const auditInputCostPer1M = Number.parseFloat(getArg("--audit-input-cost-per-1m") ?? process.env.AUDIT_INPUT_COST_PER_1M ?? "");
+const auditOutputCostPer1M = Number.parseFloat(getArg("--audit-output-cost-per-1m") ?? process.env.AUDIT_OUTPUT_COST_PER_1M ?? "");
 const dbPath =
   getArg("--db") ??
   process.env.RALPH_DASHBOARD_DB ??
@@ -51,6 +57,8 @@ db.exec(`
     updated_at TEXT NOT NULL,
     latest_turn INTEGER,
     latest_audit_score REAL,
+    total_tokens INTEGER,
+    estimated_cost_usd REAL,
     done_detected INTEGER NOT NULL,
     status TEXT NOT NULL
   );
@@ -74,12 +82,25 @@ db.exec(`
   ON run_snapshots(run_id, generated_at DESC);
 `);
 
+try {
+  db.exec("ALTER TABLE run_cards ADD COLUMN total_tokens INTEGER");
+} catch {
+  // Column already exists in upgraded databases.
+}
+try {
+  db.exec("ALTER TABLE run_cards ADD COLUMN estimated_cost_usd REAL");
+} catch {
+  // Column already exists in upgraded databases.
+}
+
 function fromDbRow(row: {
   run_id: string;
   started_at: string;
   updated_at: string;
   latest_turn: number | null;
   latest_audit_score: number | null;
+  total_tokens: number | null;
+  estimated_cost_usd: number | null;
   done_detected: number;
   status: string;
 }): RunCard {
@@ -89,6 +110,8 @@ function fromDbRow(row: {
     updatedAt: row.updated_at,
     ...(typeof row.latest_turn === "number" ? { latestTurn: row.latest_turn } : {}),
     ...(typeof row.latest_audit_score === "number" ? { latestAuditScore: row.latest_audit_score } : {}),
+    ...(typeof row.total_tokens === "number" ? { totalTokens: row.total_tokens } : {}),
+    ...(typeof row.estimated_cost_usd === "number" ? { estimatedCostUsd: row.estimated_cost_usd } : {}),
     doneDetected: row.done_detected === 1,
     status: row.status === "done" || row.status === "running" ? row.status : "idle"
   };
@@ -98,7 +121,7 @@ function loadHistory(repoPath: string, limit = 50): RunCard[] {
   const rows = db
     .prepare(
       `
-      SELECT run_id, started_at, updated_at, latest_turn, latest_audit_score, done_detected, status
+      SELECT run_id, started_at, updated_at, latest_turn, latest_audit_score, total_tokens, estimated_cost_usd, done_detected, status
       FROM run_cards
       WHERE target_repo = ?
       ORDER BY updated_at DESC
@@ -111,6 +134,8 @@ function loadHistory(repoPath: string, limit = 50): RunCard[] {
     updated_at: string;
     latest_turn: number | null;
     latest_audit_score: number | null;
+    total_tokens: number | null;
+    estimated_cost_usd: number | null;
     done_detected: number;
     status: string;
   }>;
@@ -135,13 +160,15 @@ function upsertRunCard(data: RunSnapshot): void {
   db.prepare(
     `
     INSERT INTO run_cards (
-      run_id, target_repo, started_at, updated_at, latest_turn, latest_audit_score, done_detected, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      run_id, target_repo, started_at, updated_at, latest_turn, latest_audit_score, total_tokens, estimated_cost_usd, done_detected, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id) DO UPDATE SET
       target_repo = excluded.target_repo,
       updated_at = excluded.updated_at,
       latest_turn = excluded.latest_turn,
       latest_audit_score = excluded.latest_audit_score,
+      total_tokens = excluded.total_tokens,
+      estimated_cost_usd = excluded.estimated_cost_usd,
       done_detected = excluded.done_detected,
       status = excluded.status
   `
@@ -152,6 +179,8 @@ function upsertRunCard(data: RunSnapshot): void {
     now,
     data.metrics.latestTurn ?? null,
     data.metrics.latestAuditScore ?? null,
+    data.metrics.totalTokens,
+    data.metrics.estimatedCostUsd ?? null,
     data.metrics.doneDetected ? 1 : 0,
     statusFromSnapshot(data)
   );
@@ -216,7 +245,20 @@ let snapshot: RunSnapshot = {
   metrics: {
     turnCount: 0,
     auditCount: 0,
-    doneDetected: false
+    doneDetected: false,
+    mainInputTokens: 0,
+    mainOutputTokens: 0,
+    mainCacheReadTokens: 0,
+    mainCacheWriteTokens: 0,
+    auditInputTokens: 0,
+    auditOutputTokens: 0,
+    auditCacheReadTokens: 0,
+    auditCacheWriteTokens: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalCacheWriteTokens: 0,
+    totalTokens: 0
   }
 };
 
@@ -228,7 +270,12 @@ function statePayload(): DashboardState {
 }
 
 async function refreshSnapshot(): Promise<void> {
-  const next = await scanRepo(targetRepo);
+  const next = await scanRepo(targetRepo, {
+    ...(Number.isFinite(mainInputCostPer1M) ? { mainInputCostPer1M } : {}),
+    ...(Number.isFinite(mainOutputCostPer1M) ? { mainOutputCostPer1M } : {}),
+    ...(Number.isFinite(auditInputCostPer1M) ? { auditInputCostPer1M } : {}),
+    ...(Number.isFinite(auditOutputCostPer1M) ? { auditOutputCostPer1M } : {})
+  });
   snapshot = next;
   upsertRunCard(next);
   appendSnapshot(next);
@@ -240,7 +287,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", targetRepo, pollMs, dbPath });
+  res.json({
+    status: "ok",
+    targetRepo,
+    pollMs,
+    dbPath,
+    pricing: {
+      mainInputCostPer1M: Number.isFinite(mainInputCostPer1M) ? mainInputCostPer1M : null,
+      mainOutputCostPer1M: Number.isFinite(mainOutputCostPer1M) ? mainOutputCostPer1M : null,
+      auditInputCostPer1M: Number.isFinite(auditInputCostPer1M) ? auditInputCostPer1M : null,
+      auditOutputCostPer1M: Number.isFinite(auditOutputCostPer1M) ? auditOutputCostPer1M : null
+    }
+  });
 });
 
 app.get("/api/state", (_req, res) => {
@@ -291,4 +349,10 @@ server.listen(port, () => {
   console.log(`[dashboard] listening on http://localhost:${port}`);
   console.log(`[dashboard] target repo: ${targetRepo}`);
   console.log(`[dashboard] sqlite db: ${dbPath}`);
+  if (Number.isFinite(mainInputCostPer1M) && Number.isFinite(mainOutputCostPer1M)) {
+    console.log(`[dashboard] pricing main: in=${mainInputCostPer1M}/1M out=${mainOutputCostPer1M}/1M`);
+  }
+  if (Number.isFinite(auditInputCostPer1M) && Number.isFinite(auditOutputCostPer1M)) {
+    console.log(`[dashboard] pricing audit: in=${auditInputCostPer1M}/1M out=${auditOutputCostPer1M}/1M`);
+  }
 });

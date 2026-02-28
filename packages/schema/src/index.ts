@@ -18,6 +18,7 @@ export interface TurnAudit {
   verdict?: "PASS" | "FAIL";
   axisScores: AuditAxisScores;
   thresholdIssues?: string;
+  usage?: TokenUsage;
 }
 
 export interface TurnSummary {
@@ -30,6 +31,7 @@ export interface TurnSummary {
   lastMessagePath: string;
   startedAt?: string;
   finishedAt?: string;
+  usage?: TokenUsage;
 }
 
 export interface DagNode {
@@ -67,5 +69,36 @@ export interface RunSnapshot {
     latestTurn?: number;
     latestAuditScore?: number;
     doneDetected: boolean;
+    mainInputTokens: number;
+    mainOutputTokens: number;
+    mainCacheReadTokens: number;
+    mainCacheWriteTokens: number;
+    auditInputTokens: number;
+    auditOutputTokens: number;
+    auditCacheReadTokens: number;
+    auditCacheWriteTokens: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCacheReadTokens: number;
+    totalCacheWriteTokens: number;
+    totalTokens: number;
+    estimatedCostUsd?: number;
+    estimatedMainCostUsd?: number;
+    estimatedAuditCostUsd?: number;
   };
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+}
+
+export interface ScanPricing {
+  mainInputCostPer1M?: number;
+  mainOutputCostPer1M?: number;
+  auditInputCostPer1M?: number;
+  auditOutputCostPer1M?: number;
 }

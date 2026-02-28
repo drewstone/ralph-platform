@@ -58,6 +58,19 @@ npm install
 npm run dev:dashboard -- --target ~/code/superkabal --port 4310
 ```
 
+The dashboard product surface is called **Ralph Forge**.
+V3 architecture and execution blueprint:
+- `docs/forge-v3-blueprint.md`
+
+Optional token pricing flags (for live/post-run cost estimates):
+```bash
+npm run dev:dashboard -- --target ~/code/superkabal --port 4310 \
+  --main-input-cost-per-1m 3.00 \
+  --main-output-cost-per-1m 15.00 \
+  --audit-input-cost-per-1m 3.00 \
+  --audit-output-cost-per-1m 15.00
+```
+
 Open:
 - `http://localhost:4310`
 
