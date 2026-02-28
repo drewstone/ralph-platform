@@ -579,6 +579,119 @@
         flex-wrap: wrap;
       }
 
+      .drawer-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(21, 30, 41, 0.35);
+        backdrop-filter: blur(2px);
+        z-index: 90;
+        display: none;
+      }
+
+      .drawer-overlay.open {
+        display: block;
+      }
+
+      .log-drawer {
+        position: fixed;
+        right: 0;
+        top: 0;
+        width: min(680px, 92vw);
+        height: 100vh;
+        background: #fffdf9;
+        border-left: 1px solid #d6ccb9;
+        box-shadow: -20px 0 44px rgba(30, 41, 59, 0.16);
+        z-index: 91;
+        transform: translateX(105%);
+        transition: transform 220ms ease;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+      }
+
+      .log-drawer.open {
+        transform: translateX(0);
+      }
+
+      .drawer-head {
+        padding: 14px 16px;
+        border-bottom: 1px solid #e4d9c7;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .drawer-title {
+        font: 700 16px/1 \"Space Grotesk\", sans-serif;
+      }
+
+      .drawer-body {
+        overflow: auto;
+        padding: 12px 16px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .drawer-meta {
+        display: grid;
+        gap: 5px;
+        font-size: 12px;
+        color: var(--ink-soft);
+      }
+
+      .drawer-section h4 {
+        margin: 0 0 8px;
+        font: 600 12px/1 \"IBM Plex Mono\", monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--ink-soft);
+      }
+
+      .log-box {
+        border: 1px solid #dbcdb8;
+        border-radius: 10px;
+        background: #121b27;
+        color: #dbe5f1;
+        padding: 10px;
+        max-height: 300px;
+        overflow: auto;
+        font: 12px/1.35 \"IBM Plex Mono\", monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .event-list {
+        display: grid;
+        gap: 6px;
+      }
+
+      .event-item {
+        border: 1px solid #dbcdb8;
+        border-radius: 8px;
+        background: #fffefb;
+        padding: 8px;
+      }
+
+      .event-item .event-meta {
+        font: 500 11px/1 \"IBM Plex Mono\", monospace;
+        color: var(--ink-soft);
+      }
+
+      .event-item .event-message {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--ink);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .drawer-foot {
+        border-top: 1px solid #e4d9c7;
+        padding: 10px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
       .flash {
         animation: fadeInUp 320ms ease;
       }
@@ -787,9 +900,40 @@
       </section>
     </main>
 
+    <div class="drawer-overlay" id="drawerOverlay"></div>
+    <aside class="log-drawer" id="logDrawer" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title" id="drawerTitle">Run Log</div>
+          <div class="muted" id="drawerSubtitle">No run selected</div>
+        </div>
+        <button class="btn btn-secondary" id="drawerCloseBtn" type="button">Close</button>
+      </div>
+      <div class="drawer-body">
+        <section class="drawer-section">
+          <h4>Run Metadata</h4>
+          <div class="drawer-meta" id="drawerMeta"></div>
+        </section>
+        <section class="drawer-section">
+          <h4>Events</h4>
+          <div class="event-list" id="drawerEvents"></div>
+        </section>
+        <section class="drawer-section">
+          <h4>Runner Log Tail</h4>
+          <div class="log-box" id="drawerLogTail"></div>
+        </section>
+      </div>
+      <div class="drawer-foot">
+        <span class="muted" id="drawerRefreshMeta">Idle</span>
+        <button class="btn btn-secondary" id="drawerRefreshBtn" type="button">Refresh</button>
+      </div>
+    </aside>
+
     <script>
       let latestState = null;
       let submittingForge = false;
+      let selectedLogRunId = null;
+      let logDrawerPollHandle = null;
 
       function scoreColor(score) {
         if (typeof score !== "number") return "var(--ink-soft)";
@@ -924,6 +1068,86 @@
         void postForgeAction(runId, action);
       };
 
+      function setDrawerOpen(open) {
+        document.getElementById("drawerOverlay").classList.toggle("open", open);
+        document.getElementById("logDrawer").classList.toggle("open", open);
+        document.getElementById("logDrawer").setAttribute("aria-hidden", open ? "false" : "true");
+      }
+
+      async function refreshLogDrawer() {
+        if (!selectedLogRunId) return;
+        document.getElementById("drawerRefreshMeta").textContent = "Refreshing...";
+
+        try {
+          const res = await fetch(`/api/forge/runs/${encodeURIComponent(selectedLogRunId)}?limit=300&logLines=400`);
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json?.error || "failed to load run details");
+          }
+
+          const run = json.run || {};
+          const events = json.events || [];
+          const logTail = json.logTail || [];
+
+          document.getElementById("drawerTitle").textContent = `Run ${run.runId || selectedLogRunId}`;
+          document.getElementById("drawerSubtitle").textContent = `${run.status || "-"} | repo ${run.repo || "-"}`;
+          const metaLines = [
+            `status: ${run.status || "-"}`,
+            `branch: ${run.branchName || "-"} | base: ${run.baseBranch || "-"}`,
+            `created: ${run.createdAt || "-"}`,
+            `updated: ${run.updatedAt || "-"}`,
+            `started: ${run.startedAt || "-"} | finished: ${run.finishedAt || "-"}`,
+            `pid: ${run.pid ?? "-"} | exit: ${run.exitCode ?? "-"}`,
+            run.errorText ? `error: ${run.errorText}` : ""
+          ].filter(Boolean);
+          document.getElementById("drawerMeta").innerHTML = metaLines.map((line) => `<div>${safeText(line)}</div>`).join("");
+
+          document.getElementById("drawerEvents").innerHTML = events.length
+            ? events
+                .map(
+                  (event) => `
+                  <div class="event-item">
+                    <div class="event-meta">${safeText(event.createdAt)} | ${safeText(event.level)}</div>
+                    <div class="event-message">${safeText(event.message)}</div>
+                  </div>
+                `
+                )
+                .join("")
+            : '<div class="muted">No events yet.</div>';
+
+          document.getElementById("drawerLogTail").textContent = logTail.length > 0 ? logTail.join("\n") : "No runner log output yet.";
+          document.getElementById("drawerRefreshMeta").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          document.getElementById("drawerRefreshMeta").textContent = error instanceof Error ? error.message : "failed to refresh";
+        }
+      }
+
+      async function openLogDrawer(runId) {
+        selectedLogRunId = runId;
+        setDrawerOpen(true);
+        await refreshLogDrawer();
+
+        if (logDrawerPollHandle) {
+          clearInterval(logDrawerPollHandle);
+        }
+        logDrawerPollHandle = setInterval(() => {
+          void refreshLogDrawer();
+        }, 2500);
+      }
+
+      function closeLogDrawer() {
+        selectedLogRunId = null;
+        setDrawerOpen(false);
+        if (logDrawerPollHandle) {
+          clearInterval(logDrawerPollHandle);
+          logDrawerPollHandle = null;
+        }
+      }
+
+      window.handleForgeLog = (runId) => {
+        void openLogDrawer(runId);
+      };
+
       function renderStatusStrip(state) {
         const repo = state.snapshot.repo || {};
         const m = state.snapshot.metrics || {};
@@ -1030,6 +1254,7 @@
             if (run.status === "failed" || run.status === "aborted" || run.status === "completed") {
               actions.push(`<button class="btn btn-secondary" onclick="handleForgeAction('${safeText(run.runId)}','retry')">Retry</button>`);
             }
+            actions.push(`<button class="btn btn-secondary" onclick="handleForgeLog('${safeText(run.runId)}')">Logs</button>`);
 
             return `
               <article class="forge-card">
@@ -1267,6 +1492,11 @@
 
       document.getElementById("forgeRunForm").addEventListener("submit", (event) => {
         void handleForgeSubmit(event);
+      });
+      document.getElementById("drawerCloseBtn").addEventListener("click", closeLogDrawer);
+      document.getElementById("drawerOverlay").addEventListener("click", closeLogDrawer);
+      document.getElementById("drawerRefreshBtn").addEventListener("click", () => {
+        void refreshLogDrawer();
       });
 
       fetchState().catch(() => {});

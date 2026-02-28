@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -611,6 +612,17 @@ function loadForgeRunEvents(runId: string, limit = 200): ForgeRunEvent[] {
   }));
 }
 
+async function loadForgeRunLogTail(run: ForgeRun, maxLines = 200): Promise<string[]> {
+  const logPath = path.join(run.runDir, "runner.log");
+  try {
+    const raw = await readFile(logPath, "utf8");
+    const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+    return lines.slice(-maxLines);
+  } catch {
+    return [];
+  }
+}
+
 function appendForgeEvent(runId: string, level: ForgeEventLevel, message: string): void {
   db.prepare(
     `
@@ -1052,14 +1064,19 @@ app.get("/api/forge/runs", (_req, res) => {
   res.json({ forge: forgeState() });
 });
 
-app.get("/api/forge/runs/:runId", (req, res) => {
+app.get("/api/forge/runs/:runId", async (req, res) => {
   const run = loadForgeRun(req.params.runId);
   if (!run) {
     res.status(404).json({ error: "run not found" });
     return;
   }
-  const events = loadForgeRunEvents(req.params.runId, 300);
-  res.json({ run, events });
+  const limitRaw = typeof req.query.limit === "string" ? req.query.limit : "300";
+  const lineLimitRaw = typeof req.query.logLines === "string" ? req.query.logLines : "300";
+  const limit = Math.max(1, Math.min(1000, Number.parseInt(limitRaw, 10) || 300));
+  const logLinesLimit = Math.max(20, Math.min(2000, Number.parseInt(lineLimitRaw, 10) || 300));
+  const events = loadForgeRunEvents(req.params.runId, limit);
+  const logTail = await loadForgeRunLogTail(run, logLinesLimit);
+  res.json({ run, events, logTail });
 });
 
 app.post("/api/forge/runs", (req, res) => {
