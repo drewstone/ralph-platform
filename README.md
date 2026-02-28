@@ -74,6 +74,13 @@ npm run dev:dashboard -- --target ~/code/superkabal --port 4310 \
 Open:
 - `http://localhost:4310`
 
+Forge orchestration APIs (used by the Run Launcher UI):
+- `POST /api/forge/runs`
+- `POST /api/forge/runs/:runId/pause`
+- `POST /api/forge/runs/:runId/resume`
+- `POST /api/forge/runs/:runId/abort`
+- `POST /api/forge/runs/:runId/retry`
+
 ## Run loop CLI
 ```bash
 # from this repo

@@ -13,7 +13,7 @@
         --ink: #1f2933;
         --ink-soft: #425466;
         --line: #d8cfc2;
-        --surface: rgba(255, 255, 255, 0.76);
+        --surface: rgba(255, 255, 255, 0.78);
         --surface-strong: #fffefb;
         --brand: #0b6b68;
         --brand-soft: #d5efee;
@@ -79,7 +79,7 @@
       }
 
       .header-inner {
-        width: min(1440px, 96vw);
+        width: min(1460px, 96vw);
         margin: 0 auto;
         padding: 14px 0;
         display: flex;
@@ -142,16 +142,25 @@
       }
 
       @keyframes pulse {
-        0% { transform: scale(0.8); opacity: 0.75; }
-        50% { transform: scale(1.1); opacity: 1; }
-        100% { transform: scale(0.8); opacity: 0.75; }
+        0% {
+          transform: scale(0.8);
+          opacity: 0.75;
+        }
+        50% {
+          transform: scale(1.1);
+          opacity: 1;
+        }
+        100% {
+          transform: scale(0.8);
+          opacity: 0.75;
+        }
       }
 
       main {
-        width: min(1440px, 96vw);
+        width: min(1460px, 96vw);
         margin: 18px auto 28px;
         display: grid;
-        grid-template-columns: 300px minmax(0, 1fr) 320px;
+        grid-template-columns: 300px minmax(0, 1fr) 350px;
         gap: 16px;
       }
 
@@ -224,9 +233,34 @@
         font: 500 11px/1 "IBM Plex Mono", monospace;
       }
 
-      .pill.running { background: #d8efe9; color: #0a665b; }
-      .pill.done { background: #daf4e6; color: #146c43; }
-      .pill.idle { background: #ece8e1; color: #6b7280; }
+      .pill.running {
+        background: #d8efe9;
+        color: #0a665b;
+      }
+
+      .pill.done,
+      .pill.completed {
+        background: #daf4e6;
+        color: #146c43;
+      }
+
+      .pill.idle,
+      .pill.queued {
+        background: #ece8e1;
+        color: #6b7280;
+      }
+
+      .pill.failed,
+      .pill.aborted,
+      .pill.aborting {
+        background: #fde5e5;
+        color: #b42318;
+      }
+
+      .pill.paused {
+        background: #fff0db;
+        color: #b45309;
+      }
 
       .center-col,
       .right-col {
@@ -291,10 +325,26 @@
         text-anchor: middle;
       }
 
-      .repo-node { fill: #e5e7eb; stroke: #6b7280; }
-      .turn-node { fill: #d4eceb; stroke: #0b6b68; }
-      .audit-node { fill: #fde5cb; stroke: #c05621; }
-      .edge { stroke: #8f9aa6; stroke-width: 1.4; marker-end: url(#arrow); }
+      .repo-node {
+        fill: #e5e7eb;
+        stroke: #6b7280;
+      }
+
+      .turn-node {
+        fill: #d4eceb;
+        stroke: #0b6b68;
+      }
+
+      .audit-node {
+        fill: #fde5cb;
+        stroke: #c05621;
+      }
+
+      .edge {
+        stroke: #8f9aa6;
+        stroke-width: 1.4;
+        marker-end: url(#arrow);
+      }
 
       .data-table-wrap {
         overflow: auto;
@@ -348,8 +398,13 @@
         float: left;
       }
 
-      .stack-main { background: linear-gradient(90deg, #0f9f8a, #0b6b68); }
-      .stack-audit { background: linear-gradient(90deg, #e89a58, #dd6b20); }
+      .stack-main {
+        background: linear-gradient(90deg, #0f9f8a, #0b6b68);
+      }
+
+      .stack-audit {
+        background: linear-gradient(90deg, #e89a58, #dd6b20);
+      }
 
       .legend {
         display: flex;
@@ -410,6 +465,120 @@
         color: var(--ink-soft);
       }
 
+      .forge-form {
+        padding: 12px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .forge-row {
+        display: grid;
+        gap: 6px;
+      }
+
+      .forge-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .forge-form label {
+        font: 500 11px/1 "IBM Plex Mono", monospace;
+        color: var(--ink-soft);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .forge-form input,
+      .forge-form textarea {
+        width: 100%;
+        border: 1px solid #d9cfbf;
+        border-radius: 10px;
+        padding: 8px;
+        background: #fffcf6;
+        color: var(--ink);
+        font: 13px/1.3 "IBM Plex Sans", sans-serif;
+      }
+
+      .forge-form textarea {
+        min-height: 68px;
+        resize: vertical;
+      }
+
+      .toggle-row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .toggle-row label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font: 500 12px/1 "IBM Plex Sans", sans-serif;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+
+      .btn {
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 8px 10px;
+        font: 600 12px/1 "IBM Plex Sans", sans-serif;
+        cursor: pointer;
+      }
+
+      .btn:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .btn-primary {
+        background: var(--brand);
+        color: #f2fffd;
+      }
+
+      .btn-secondary {
+        background: #ede7dd;
+        color: #4b5563;
+      }
+
+      .btn-danger {
+        background: #fee4e2;
+        color: #b42318;
+      }
+
+      .forge-status {
+        min-height: 16px;
+      }
+
+      .forge-runs {
+        padding: 10px 12px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .forge-card {
+        border: 1px solid #ddd2c4;
+        border-radius: 10px;
+        background: #fffdf8;
+        padding: 9px;
+        display: grid;
+        gap: 7px;
+      }
+
+      .forge-meta {
+        font-size: 11px;
+        color: var(--ink-soft);
+      }
+
+      .forge-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
       .flash {
         animation: fadeInUp 320ms ease;
       }
@@ -425,7 +594,7 @@
         }
       }
 
-      @media (max-width: 1240px) {
+      @media (max-width: 1290px) {
         main {
           grid-template-columns: 1fr;
         }
@@ -443,13 +612,14 @@
         }
       }
 
-      @media (max-width: 720px) {
+      @media (max-width: 760px) {
         .header-inner {
           flex-direction: column;
           align-items: flex-start;
         }
 
-        .kpi-grid {
+        .kpi-grid,
+        .forge-grid {
           grid-template-columns: 1fr;
         }
 
@@ -478,7 +648,7 @@
     <main>
       <section class="panel run-rail flash">
         <div class="panel-head">
-          <h2>Runs</h2>
+          <h2>Run History</h2>
           <div class="muted">Recent execution history with cost and score context.</div>
         </div>
         <div id="runHistory"></div>
@@ -539,6 +709,60 @@
       <section class="right-col">
         <section class="panel flash">
           <div class="panel-head">
+            <h3>Run Launcher</h3>
+            <div class="muted">Create and queue new autonomous runs.</div>
+          </div>
+          <form class="forge-form" id="forgeRunForm">
+            <div class="forge-row">
+              <label for="forgeRepo">Repo Path</label>
+              <input id="forgeRepo" name="repo" placeholder="/Users/drew/webb/agent-dev-container" required />
+            </div>
+            <div class="forge-grid">
+              <div class="forge-row">
+                <label for="forgeSpec">Spec File</label>
+                <input id="forgeSpec" name="specFile" placeholder="/abs/path/spec.md" />
+              </div>
+              <div class="forge-row">
+                <label for="forgeBase">Base Branch</label>
+                <input id="forgeBase" name="baseBranch" placeholder="main" />
+              </div>
+            </div>
+            <div class="forge-row">
+              <label for="forgeTask">Task Text</label>
+              <textarea id="forgeTask" name="taskText" placeholder="Describe the implementation objective..."></textarea>
+            </div>
+            <div class="forge-grid">
+              <div class="forge-row">
+                <label for="forgeBranch">Branch Name</label>
+                <input id="forgeBranch" name="branchName" placeholder="ralph/feature-xyz" />
+              </div>
+              <div class="forge-row">
+                <label for="forgeLoopArgs">Loop Args</label>
+                <input id="forgeLoopArgs" name="loopArgs" placeholder="--max-turns 80 --audit-every 3" />
+              </div>
+            </div>
+            <div class="toggle-row">
+              <label><input type="checkbox" id="forgeWorktree" checked /> worktree</label>
+              <label><input type="checkbox" id="forgeOpenPr" /> open PR</label>
+              <label><input type="checkbox" id="forgeNoPush" /> no push</label>
+            </div>
+            <div class="toggle-row">
+              <button class="btn btn-primary" id="forgeSubmitBtn" type="submit">Queue Run</button>
+              <span class="forge-status muted" id="forgeCreateStatus"></span>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel flash">
+          <div class="panel-head">
+            <h3>Orchestrator Runs</h3>
+            <div class="muted" id="forgeQueueMeta">Queue status loading...</div>
+          </div>
+          <div class="forge-runs" id="forgeRuns"></div>
+        </section>
+
+        <section class="panel flash">
+          <div class="panel-head">
             <h3>Token Economics</h3>
             <div class="muted">Real-time and post-run spend visibility.</div>
           </div>
@@ -565,6 +789,7 @@
 
     <script>
       let latestState = null;
+      let submittingForge = false;
 
       function scoreColor(score) {
         if (typeof score !== "number") return "var(--ink-soft)";
@@ -596,15 +821,121 @@
         return Math.max(0, Math.min(100, (part / total) * 100));
       }
 
+      function splitArgs(argString) {
+        if (!argString || typeof argString !== "string") return [];
+        return argString
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+      }
+
+      function setForgeStatus(message, isError = false) {
+        const el = document.getElementById("forgeCreateStatus");
+        el.textContent = message || "";
+        el.style.color = isError ? "var(--bad)" : "var(--ink-soft)";
+      }
+
+      function syncForgeButton() {
+        const btn = document.getElementById("forgeSubmitBtn");
+        btn.disabled = submittingForge;
+        btn.textContent = submittingForge ? "Queueing..." : "Queue Run";
+      }
+
+      async function handleForgeSubmit(event) {
+        event.preventDefault();
+        if (submittingForge) return;
+
+        const repo = document.getElementById("forgeRepo").value.trim();
+        const specFile = document.getElementById("forgeSpec").value.trim();
+        const taskText = document.getElementById("forgeTask").value.trim();
+        const baseBranch = document.getElementById("forgeBase").value.trim();
+        const branchName = document.getElementById("forgeBranch").value.trim();
+        const loopArgsRaw = document.getElementById("forgeLoopArgs").value.trim();
+        const worktree = document.getElementById("forgeWorktree").checked;
+        const openPr = document.getElementById("forgeOpenPr").checked;
+        const noPush = document.getElementById("forgeNoPush").checked;
+
+        if (!repo) {
+          setForgeStatus("repo path is required", true);
+          return;
+        }
+        if (!specFile && !taskText) {
+          setForgeStatus("spec file or task text is required", true);
+          return;
+        }
+
+        const payload = {
+          repo,
+          ...(specFile ? { specFile } : {}),
+          ...(taskText ? { taskText } : {}),
+          ...(baseBranch ? { baseBranch } : {}),
+          ...(branchName ? { branchName } : {}),
+          loopArgs: splitArgs(loopArgsRaw),
+          worktree,
+          openPr,
+          noPush
+        };
+
+        submittingForge = true;
+        syncForgeButton();
+        setForgeStatus("queueing run...");
+
+        try {
+          const res = await fetch("/api/forge/runs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json?.error || "failed to queue run");
+          }
+          setForgeStatus(`queued ${json.run.runId}`);
+          if (!specFile) {
+            document.getElementById("forgeTask").value = "";
+          }
+          document.getElementById("forgeBranch").value = "";
+          document.getElementById("forgeLoopArgs").value = "";
+          await fetchState();
+        } catch (error) {
+          setForgeStatus(error instanceof Error ? error.message : "failed to queue run", true);
+        } finally {
+          submittingForge = false;
+          syncForgeButton();
+        }
+      }
+
+      async function postForgeAction(runId, action) {
+        try {
+          const res = await fetch(`/api/forge/runs/${encodeURIComponent(runId)}/${action}`, {
+            method: "POST"
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json?.error || `failed action: ${action}`);
+          }
+          await fetchState();
+        } catch (error) {
+          setForgeStatus(error instanceof Error ? error.message : `failed action: ${action}`, true);
+        }
+      }
+
+      window.handleForgeAction = (runId, action) => {
+        void postForgeAction(runId, action);
+      };
+
       function renderStatusStrip(state) {
         const repo = state.snapshot.repo || {};
         const m = state.snapshot.metrics || {};
+        const forge = state.forge || { activeRunId: null, queue: [], runs: [] };
         const chips = [];
         chips.push(`<span class="chip"><span class="dot"></span>live stream</span>`);
         chips.push(`<span class="chip">repo: ${safeText(state.snapshot.targetRepo || "-")}</span>`);
         chips.push(`<span class="chip">branch: ${safeText(repo.gitBranch || "-")}</span>`);
         chips.push(`<span class="chip">state: ${m.doneDetected ? "complete" : m.latestTurn ? "running" : "idle"}</span>`);
         chips.push(`<span class="chip">tokens: ${safeText(formatInt(m.totalTokens))}</span>`);
+        chips.push(`<span class="chip">forge active: ${safeText(forge.activeRunId ? forge.activeRunId.slice(0, 8) : "none")}</span>`);
+        chips.push(`<span class="chip">forge queue: ${safeText((forge.queue || []).length)}</span>`);
         document.getElementById("statusStrip").innerHTML = chips.join("");
       }
 
@@ -658,7 +989,8 @@
         }
 
         wrap.innerHTML = runs
-          .map((run) => `
+          .map(
+            (run) => `
             <article class="run-card">
               <div class="run-title">${safeText(run.id)}</div>
               <span class="pill ${safeText(run.status)}">${safeText(run.status)}</span>
@@ -666,7 +998,51 @@
               <div class="muted">tokens ${safeText(formatInt(run.totalTokens))} | cost ${safeText(formatUsd(run.estimatedCostUsd))}</div>
               <div class="muted">updated ${safeText(run.updatedAt)}</div>
             </article>
-          `)
+          `
+          )
+          .join("");
+      }
+
+      function renderForgeRuns(state) {
+        const forge = state.forge || { activeRunId: null, queue: [], runs: [] };
+        const runs = forge.runs || [];
+        const active = forge.activeRunId;
+
+        document.getElementById("forgeQueueMeta").textContent = `active ${active ? active.slice(0, 8) : "none"} | queued ${(forge.queue || []).length}`;
+
+        if (runs.length === 0) {
+          document.getElementById("forgeRuns").innerHTML = '<div class="muted">No orchestrator runs yet.</div>';
+          return;
+        }
+
+        document.getElementById("forgeRuns").innerHTML = runs
+          .map((run) => {
+            const actions = [];
+            if (run.status === "running") {
+              actions.push(`<button class="btn btn-secondary" onclick="handleForgeAction('${safeText(run.runId)}','pause')">Pause</button>`);
+              actions.push(`<button class="btn btn-danger" onclick="handleForgeAction('${safeText(run.runId)}','abort')">Abort</button>`);
+            } else if (run.status === "paused") {
+              actions.push(`<button class="btn btn-secondary" onclick="handleForgeAction('${safeText(run.runId)}','resume')">Resume</button>`);
+              actions.push(`<button class="btn btn-danger" onclick="handleForgeAction('${safeText(run.runId)}','abort')">Abort</button>`);
+            } else if (run.status === "queued") {
+              actions.push(`<button class="btn btn-danger" onclick="handleForgeAction('${safeText(run.runId)}','abort')">Cancel</button>`);
+            }
+            if (run.status === "failed" || run.status === "aborted" || run.status === "completed") {
+              actions.push(`<button class="btn btn-secondary" onclick="handleForgeAction('${safeText(run.runId)}','retry')">Retry</button>`);
+            }
+
+            return `
+              <article class="forge-card">
+                <div class="run-title">${safeText(run.runId)}</div>
+                <span class="pill ${safeText(run.status)}">${safeText(run.status)}</span>
+                <div class="forge-meta">repo ${safeText(run.repo)}</div>
+                <div class="forge-meta">branch ${safeText(run.branchName || "-")} | base ${safeText(run.baseBranch || "-")}</div>
+                <div class="forge-meta">updated ${safeText(run.updatedAt)}</div>
+                ${run.errorText ? `<div class="forge-meta" style="color:var(--bad)">${safeText(run.errorText)}</div>` : ""}
+                <div class="forge-actions">${actions.join("")}</div>
+              </article>
+            `;
+          })
           .join("");
       }
 
@@ -763,7 +1139,7 @@
         const notes = [];
 
         if (!m.latestTurn) {
-          notes.push("No active turns yet. Start a run to populate live execution data.");
+          notes.push("No active turns yet. Queue a run from Run Launcher to begin execution.");
         } else {
           notes.push(`Run is ${m.doneDetected ? "complete" : "active"} at turn ${m.latestTurn}.`);
         }
@@ -847,11 +1223,20 @@
         svg.innerHTML = defs + edgeLines + nodeShapes;
       }
 
+      function ensureRepoDefault(state) {
+        const repoInput = document.getElementById("forgeRepo");
+        if (!repoInput.value && state.snapshot && state.snapshot.targetRepo) {
+          repoInput.value = state.snapshot.targetRepo;
+        }
+      }
+
       function render(state) {
         latestState = state;
+        ensureRepoDefault(state);
         renderStatusStrip(state);
         renderSummary(state);
         renderRunHistory(state);
+        renderForgeRuns(state);
         renderTurns(state);
         renderAudits(state);
         renderEconomics(state);
@@ -879,6 +1264,10 @@
           setTimeout(initWebSocket, 2000);
         };
       }
+
+      document.getElementById("forgeRunForm").addEventListener("submit", (event) => {
+        void handleForgeSubmit(event);
+      });
 
       fetchState().catch(() => {});
       setInterval(() => {
