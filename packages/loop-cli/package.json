@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "bin": {
+    "ralph": "bin/ralph",
     "ralph-loop": "bin/ralph-loop.sh",
     "ralph-dispatch": "bin/ralph-dispatch.sh"
   },
   "scripts": {
-    "lint": "bash -n bin/ralph-loop.sh bin/ralph-dispatch.sh"
+    "lint": "bash -n bin/ralph bin/ralph-loop.sh bin/ralph-dispatch.sh"
   }
 }

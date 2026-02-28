@@ -66,11 +66,32 @@ Open:
 # from this repo
 ./packages/loop-cli/bin/ralph-loop.sh --help
 ./packages/loop-cli/bin/ralph-dispatch.sh --help
+./packages/loop-cli/bin/ralph --help
 
 # after npm linking/installing as bin
+ralph --help
 ralph-loop --help
 ralph-dispatch --help
 ```
+
+`ralph-loop` supports repeatable `--inject` and repeatable `--inject-text` for direct runs.
+
+## Install CLI (GitHub release)
+```bash
+curl -fsSL https://raw.githubusercontent.com/drewstone/ralph-platform/main/scripts/install.sh | bash
+```
+
+Then use:
+```bash
+ralph --help
+ralph loop --help
+ralph dispatch --help
+```
+
+Release tags:
+- push tag format `loop-cli-vX.Y.Z` to publish release assets.
+- installer defaults to `releases/latest`; pin with:
+  - `curl -fsSL https://raw.githubusercontent.com/drewstone/ralph-platform/main/scripts/install.sh | bash -s -- --version X.Y.Z`
 
 ## Dispatch to another repo and open PR when done
 `ralph-dispatch` creates a branch, runs `ralph-loop` in the target repo, and only commits/pushes/opens a PR if the loop exits successfully.
@@ -78,6 +99,7 @@ ralph-dispatch --help
 ```bash
 ./packages/loop-cli/bin/ralph-dispatch.sh \
   --repo ~/code/other-project \
+  --worktree \
   --task "Prod bug: GitHub connection is failing in workspace flow." \
   --preflight \
   --bootstrap-audit \
@@ -91,10 +113,16 @@ You can also dispatch from an existing spec:
 ```bash
 ./packages/loop-cli/bin/ralph-dispatch.sh \
   --repo ~/code/other-project \
+  --worktree \
   --spec ~/code/superkabal/specs/apps/faith-christian-scripture.md \
   --branch ralph/faith-christian-scripture \
   --open-pr
 ```
+
+Worktree mode:
+- `--worktree` runs Ralph in an isolated git worktree and avoids switching your primary checkout branch.
+- By default the dispatch worktree is removed after a successful run.
+- Use `--worktree-keep` to keep it for inspection.
 
 Injection layering order:
 1. `~/.ralph/inject/default.md` (or `$RALPH_GLOBAL_INJECT`)

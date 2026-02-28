@@ -24,6 +24,9 @@ Dispatch options:
   --branch NAME           Working branch name (default: ralph/<timestamp>).
   --base BRANCH           Base branch for PR/branch point (default: origin/HEAD or main).
   --remote NAME           Git remote name (default: origin).
+  --worktree              Run in an isolated git worktree instead of switching the main checkout.
+  --worktree-dir DIR      Explicit worktree path (default: sibling .ralph-worktrees-<repo>/<branch>).
+  --worktree-keep         Keep worktree after successful run (default: remove on success).
   --open-pr               Open a GitHub PR after successful push.
   --draft-pr              Create PR as draft (requires --open-pr).
   --pr-title TEXT         PR title override.
@@ -417,6 +420,9 @@ COMMIT_MESSAGE=""
 ALLOW_DIRTY="false"
 DO_FETCH="true"
 DO_PUSH="true"
+USE_WORKTREE="false"
+WORKTREE_DIR=""
+KEEP_WORKTREE_ON_SUCCESS="false"
 LOOP_FORWARD_ARGS=()
 CALLER_DIR="$(pwd)"
 
@@ -482,6 +488,19 @@ while [[ $# -gt 0 ]]; do
       REMOTE_NAME="${2:-}"
       shift 2
       ;;
+    --worktree)
+      USE_WORKTREE="true"
+      shift
+      ;;
+    --worktree-dir)
+      WORKTREE_DIR="${2:-}"
+      USE_WORKTREE="true"
+      shift 2
+      ;;
+    --worktree-keep)
+      KEEP_WORKTREE_ON_SUCCESS="true"
+      shift
+      ;;
     --open-pr)
       OPEN_PR="true"
       shift
@@ -539,6 +558,9 @@ fi
 if [[ "$OPEN_PR" == "true" && "$DO_PUSH" != "true" ]]; then
   die "--open-pr requires push (remove --no-push)"
 fi
+if [[ "$KEEP_WORKTREE_ON_SUCCESS" == "true" && "$USE_WORKTREE" != "true" ]]; then
+  die "--worktree-keep requires --worktree"
+fi
 if [[ -n "$PR_BODY_FILE" && ! -f "$PR_BODY_FILE" ]]; then
   die "PR body file not found: $PR_BODY_FILE"
 fi
@@ -570,7 +592,7 @@ if [[ -n "$PR_BODY_FILE" ]]; then
   [[ -f "$PR_BODY_FILE" ]] || die "PR body file not found: $PR_BODY_FILE"
 fi
 
-if [[ "$ALLOW_DIRTY" != "true" ]]; then
+if [[ "$USE_WORKTREE" != "true" && "$ALLOW_DIRTY" != "true" ]]; then
   if [[ -n "$(git -C "$REPO_DIR" status --porcelain)" ]]; then
     die "Repository has uncommitted changes. Commit/stash or pass --allow-dirty."
   fi
@@ -597,13 +619,29 @@ elif ! git -C "$REPO_DIR" show-ref --verify --quiet "refs/heads/${BASE_BRANCH}";
   die "Base branch not found locally or on ${REMOTE_NAME}: ${BASE_BRANCH}"
 fi
 
-git -C "$REPO_DIR" switch -c "$BRANCH_NAME" "$start_ref"
+RUN_REPO_DIR="$REPO_DIR"
+WORKTREE_CREATED="false"
+if [[ "$USE_WORKTREE" == "true" ]]; then
+  if [[ -z "$WORKTREE_DIR" ]]; then
+    repo_base_name="$(basename "$REPO_DIR")"
+    repo_parent_dir="$(dirname "$REPO_DIR")"
+    WORKTREE_DIR="${repo_parent_dir}/.ralph-worktrees-${repo_base_name}/${BRANCH_NAME}"
+  fi
+  WORKTREE_DIR="$(resolve_path "$WORKTREE_DIR")"
+  [[ ! -e "$WORKTREE_DIR" ]] || die "Worktree path already exists: $WORKTREE_DIR"
+  mkdir -p "$(dirname "$WORKTREE_DIR")"
+  git -C "$REPO_DIR" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$start_ref"
+  RUN_REPO_DIR="$WORKTREE_DIR"
+  WORKTREE_CREATED="true"
+else
+  git -C "$REPO_DIR" switch -c "$BRANCH_NAME" "$start_ref"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOOP_BIN="$SCRIPT_DIR/ralph-loop.sh"
 [[ -x "$LOOP_BIN" ]] || die "ralph-loop.sh not executable at $LOOP_BIN"
 
-DISPATCH_DIR="$REPO_DIR/.ralph/dispatch"
+DISPATCH_DIR="$RUN_REPO_DIR/.ralph/dispatch"
 mkdir -p "$DISPATCH_DIR"
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BASE_SPEC_FILE="$DISPATCH_DIR/spec.base.${RUN_STAMP}.md"
@@ -614,27 +652,32 @@ BOOTSTRAP_PROMPT_FILE="$DISPATCH_DIR/bootstrap.prompt.${RUN_STAMP}.txt"
 BOOTSTRAP_STDOUT_FILE="$DISPATCH_DIR/bootstrap.stdout.${RUN_STAMP}.log"
 BOOTSTRAP_LAST_FILE="$DISPATCH_DIR/bootstrap.last.${RUN_STAMP}.txt"
 TMP_PR_BODY_FILE="$DISPATCH_DIR/pr-body.${RUN_STAMP}.md"
+RUN_COMPLETED_SUCCESS="false"
 
 cleanup() {
   if [[ -f "$TMP_PR_BODY_FILE" && -z "$PR_BODY_FILE" ]]; then
     rm -f "$TMP_PR_BODY_FILE"
   fi
+  if [[ "$WORKTREE_CREATED" == "true" && "$RUN_COMPLETED_SUCCESS" == "true" && "$KEEP_WORKTREE_ON_SUCCESS" != "true" ]]; then
+    git -C "$REPO_DIR" worktree remove "$WORKTREE_DIR" >/dev/null 2>&1 || true
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
 if [[ "$PRE_FLIGHT" == "true" ]]; then
-  generate_preflight_context "$PRE_FLIGHT_FILE" "$REPO_DIR"
+  generate_preflight_context "$PRE_FLIGHT_FILE" "$RUN_REPO_DIR"
 else
   PRE_FLIGHT_FILE=""
 fi
 
-build_temp_spec "$BASE_SPEC_FILE" "$REPO_DIR" "$TASK_TEXT" "$SPEC_FILE" "$PRE_FLIGHT_FILE"
+build_temp_spec "$BASE_SPEC_FILE" "$RUN_REPO_DIR" "$TASK_TEXT" "$SPEC_FILE" "$PRE_FLIGHT_FILE"
 
 if [[ "$BOOTSTRAP_AUDIT" == "true" ]]; then
   echo "Bootstrap audit: generating execution spec..."
   if ! run_bootstrap_audit \
     "$CODEX_BIN" \
-    "$REPO_DIR" \
+    "$RUN_REPO_DIR" \
     "$BASE_SPEC_FILE" \
     "$PRE_FLIGHT_FILE" \
     "$FINAL_SPEC_FILE" \
@@ -648,14 +691,14 @@ else
 fi
 
 USE_INJECT_FILE=""
-if build_merged_inject "$MERGED_INJECT_FILE" "$REPO_DIR" "${INJECT_FILES[@]}"; then
+if build_merged_inject "$MERGED_INJECT_FILE" "$RUN_REPO_DIR" "${INJECT_FILES[@]}"; then
   USE_INJECT_FILE="$MERGED_INJECT_FILE"
 fi
 
 loop_cmd=(
   "$LOOP_BIN"
   --spec "$FINAL_SPEC_FILE"
-  --workdir "$REPO_DIR"
+  --workdir "$RUN_REPO_DIR"
 )
 if [[ -n "$USE_INJECT_FILE" ]]; then
   loop_cmd+=(--inject "$USE_INJECT_FILE")
@@ -666,6 +709,9 @@ fi
 
 echo "Dispatch starting"
 echo "repo: $REPO_DIR"
+if [[ "$USE_WORKTREE" == "true" ]]; then
+  echo "worktree: $WORKTREE_DIR"
+fi
 echo "base: $BASE_BRANCH"
 echo "branch: $BRANCH_NAME"
 echo "spec: $FINAL_SPEC_FILE"
@@ -687,17 +733,18 @@ else
   exit "$loop_rc"
 fi
 
-if [[ -z "$(git -C "$REPO_DIR" status --porcelain)" ]]; then
+if [[ -z "$(git -C "$RUN_REPO_DIR" status --porcelain)" ]]; then
   echo "Loop finished successfully but produced no working-tree changes."
+  RUN_COMPLETED_SUCCESS="true"
   exit 0
 fi
 
 COMMIT_MESSAGE_FINAL="$(build_commit_message "$COMMIT_MESSAGE" "$TASK_TEXT" "$FINAL_SPEC_FILE")"
-git -C "$REPO_DIR" add -A
-git -C "$REPO_DIR" commit -m "$COMMIT_MESSAGE_FINAL"
+git -C "$RUN_REPO_DIR" add -A
+git -C "$RUN_REPO_DIR" commit -m "$COMMIT_MESSAGE_FINAL"
 
 if [[ "$DO_PUSH" == "true" ]]; then
-  git -C "$REPO_DIR" push -u "$REMOTE_NAME" "$BRANCH_NAME"
+  git -C "$RUN_REPO_DIR" push -u "$REMOTE_NAME" "$BRANCH_NAME"
 fi
 
 if [[ "$OPEN_PR" == "true" ]]; then
@@ -727,7 +774,7 @@ if [[ "$OPEN_PR" == "true" ]]; then
       if [[ -n "$USE_INJECT_FILE" ]]; then
         echo "- Merged inject: \`$USE_INJECT_FILE\`"
       fi
-      echo "- Logs: \`$REPO_DIR/.ralph\`"
+      echo "- Logs: \`$RUN_REPO_DIR/.ralph\`"
     } >"$TMP_PR_BODY_FILE"
     PR_BODY_FILE="$TMP_PR_BODY_FILE"
   fi
@@ -736,11 +783,19 @@ if [[ "$OPEN_PR" == "true" ]]; then
   if [[ "$DRAFT_PR" == "true" ]]; then
     pr_cmd+=(--draft)
   fi
-  (cd "$REPO_DIR" && "${pr_cmd[@]}")
+  (cd "$RUN_REPO_DIR" && "${pr_cmd[@]}")
 fi
 
+RUN_COMPLETED_SUCCESS="true"
 echo "Dispatch complete"
 echo "repo: $REPO_DIR"
+if [[ "$USE_WORKTREE" == "true" ]]; then
+  if [[ "$KEEP_WORKTREE_ON_SUCCESS" == "true" ]]; then
+    echo "worktree: kept at $WORKTREE_DIR"
+  else
+    echo "worktree: will be removed on exit ($WORKTREE_DIR)"
+  fi
+fi
 echo "branch: $BRANCH_NAME"
 if [[ "$OPEN_PR" == "true" ]]; then
   echo "pr: created"

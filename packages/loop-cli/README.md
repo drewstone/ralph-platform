@@ -4,7 +4,20 @@ Standalone loop runner CLI.
 
 Usage:
 ```bash
+ralph --help
+ralph loop --help
+ralph dispatch --help
+
 ralph-loop --help
+```
+
+Direct loop runs support both:
+- repeatable `--inject <file>`
+- repeatable `--inject-text "<inline instructions>"`
+
+Install latest release:
+```bash
+curl -fsSL https://raw.githubusercontent.com/drewstone/ralph-platform/main/scripts/install.sh | bash
 ```
 
 Or from workspace root:
@@ -18,6 +31,7 @@ Dispatch workflow (run in another repo, open PR only on success):
 ```bash
 ./packages/loop-cli/bin/ralph-dispatch.sh \
   --repo ~/code/target-repo \
+  --worktree \
   --task "Implement feature X with tests" \
   --preflight \
   --bootstrap-audit \
@@ -39,3 +53,8 @@ Audit threshold controls:
 - `--audit-critical-axis-min` sets stricter floor for critical axes (defaults to overall score threshold when unset).
 
 The loop prompt also allows high-confidence greenfield refactors in touched subsystems, with a requirement to preserve behavior (unless spec requires change) and prove parity with tests.
+
+Dispatch worktree mode:
+- `--worktree` isolates execution in a separate git worktree and leaves your main checkout untouched.
+- Successful runs clean up that worktree by default.
+- Add `--worktree-keep` to retain it after success.

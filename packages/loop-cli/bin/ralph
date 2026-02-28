@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+loop_cmd="$SCRIPT_DIR/ralph-loop"
+dispatch_cmd="$SCRIPT_DIR/ralph-dispatch"
+
+if [[ ! -x "$loop_cmd" ]]; then
+  loop_cmd="$SCRIPT_DIR/ralph-loop.sh"
+fi
+if [[ ! -x "$dispatch_cmd" ]]; then
+  dispatch_cmd="$SCRIPT_DIR/ralph-dispatch.sh"
+fi
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ralph <command> [args]
+
+Commands:
+  loop       Run Ralph loop directly.
+  dispatch   Create branch/worktree, run loop, and optionally push/open PR.
+  help       Show this help.
+
+Examples:
+  ralph loop --help
+  ralph dispatch --help
+EOF
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  loop)
+    shift
+    exec "$loop_cmd" "$@"
+    ;;
+  dispatch)
+    shift
+    exec "$dispatch_cmd" "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "Error: Unknown command: $cmd" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+esac

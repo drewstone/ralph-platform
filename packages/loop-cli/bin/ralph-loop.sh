@@ -10,7 +10,8 @@ Required:
   --spec FILE              Spec file to implement.
 
 Options:
-  --inject FILE            Extra instructions file to inject every turn.
+  --inject FILE            Extra instructions file to inject every turn (repeatable).
+  --inject-text TEXT       Inline instructions to inject every turn (repeatable).
   --workdir DIR            Project directory (default: current directory).
   --max-turns N            Max loop iterations (default: 100).
   --pretty                 Render JSON event stream into labeled human-readable output.
@@ -159,12 +160,26 @@ Response format:
 - If not complete: list the next concrete task.
 EOF
 
-  if [[ -n "$INJECT_FILE" ]]; then
-    cat >>"$prompt_file" <<EOF
-
-Injected instructions from file ($INJECT_FILE):
-$(cat "$INJECT_FILE")
-EOF
+  local inject_file inject_text
+  local inject_text_index=1
+  if [[ ${#INJECT_FILES[@]} -gt 0 ]]; then
+    for inject_file in "${INJECT_FILES[@]}"; do
+      {
+        echo
+        echo "Injected instructions from file ($inject_file):"
+        cat "$inject_file"
+      } >>"$prompt_file"
+    done
+  fi
+  if [[ ${#INJECT_TEXTS[@]} -gt 0 ]]; then
+    for inject_text in "${INJECT_TEXTS[@]}"; do
+      {
+        echo
+        echo "Injected inline instructions ($inject_text_index):"
+        printf '%s\n' "$inject_text"
+      } >>"$prompt_file"
+      inject_text_index=$((inject_text_index + 1))
+    done
   fi
 
   if [[ "$AUDIT_BLOCKERS_ACTIVE" == "true" ]] && [[ -n "$LAST_AUDIT_SCORE" ]] && [[ -f "$LAST_AUDIT_FEEDBACK_FILE" ]]; then
@@ -572,8 +587,16 @@ EOF
   if [[ -n "$AUDIT_CRITICAL_AXIS_MIN" ]]; then
     child_args+=(--audit-critical-axis-min "$AUDIT_CRITICAL_AXIS_MIN")
   fi
-  if [[ -n "$INJECT_FILE" ]]; then
-    child_args+=(--inject "$INJECT_FILE")
+  local inject_file inject_text
+  if [[ ${#INJECT_FILES[@]} -gt 0 ]]; then
+    for inject_file in "${INJECT_FILES[@]}"; do
+      child_args+=(--inject "$inject_file")
+    done
+  fi
+  if [[ ${#INJECT_TEXTS[@]} -gt 0 ]]; then
+    for inject_text in "${INJECT_TEXTS[@]}"; do
+      child_args+=(--inject-text "$inject_text")
+    done
   fi
   if [[ -n "$MODEL" ]]; then
     child_args+=(--model "$MODEL")
@@ -655,7 +678,8 @@ EOF
 }
 
 SPEC_FILE=""
-INJECT_FILE=""
+INJECT_FILES=()
+INJECT_TEXTS=()
 WORKDIR="$(pwd)"
 MAX_TURNS=100
 STOP_TOKEN="[[DONE]]"
@@ -716,7 +740,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --inject)
-      INJECT_FILE="${2:-}"
+      INJECT_FILES+=("${2:-}")
+      shift 2
+      ;;
+    --inject-text)
+      INJECT_TEXTS+=("${2:-}")
       shift 2
       ;;
     --workdir)
@@ -843,9 +871,14 @@ WORKDIR="$(resolve_path "$WORKDIR")"
 SPEC_FILE="$(resolve_input_file "$SPEC_FILE")"
 require_file "$SPEC_FILE"
 
-if [[ -n "$INJECT_FILE" ]]; then
-  INJECT_FILE="$(resolve_input_file "$INJECT_FILE")"
-  require_file "$INJECT_FILE"
+if [[ ${#INJECT_FILES[@]} -gt 0 ]]; then
+  resolved_inject_files=()
+  for inject_file in "${INJECT_FILES[@]}"; do
+    inject_file="$(resolve_input_file "$inject_file")"
+    require_file "$inject_file"
+    resolved_inject_files+=("$inject_file")
+  done
+  INJECT_FILES=("${resolved_inject_files[@]}")
 fi
 
 if [[ -n "$AUDIT_SYSTEM_PROMPT_FILE" ]]; then
@@ -865,8 +898,13 @@ ensure_docs
 echo "Ralph loop starting"
 echo "workdir: $WORKDIR"
 echo "spec: $SPEC_FILE"
-if [[ -n "$INJECT_FILE" ]]; then
-  echo "inject: $INJECT_FILE"
+if [[ ${#INJECT_FILES[@]} -gt 0 ]]; then
+  for inject_file in "${INJECT_FILES[@]}"; do
+    echo "inject: $inject_file"
+  done
+fi
+if [[ ${#INJECT_TEXTS[@]} -gt 0 ]]; then
+  echo "inject_text_blocks: ${#INJECT_TEXTS[@]}"
 fi
 echo "max_turns: $MAX_TURNS"
 echo "stop_token: $STOP_TOKEN"

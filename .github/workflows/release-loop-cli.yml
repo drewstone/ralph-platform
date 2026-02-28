@@ -1,0 +1,54 @@
+name: release-loop-cli
+
+on:
+  push:
+    tags:
+      - "loop-cli-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: meta
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#loop-cli-v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build CLI release archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          mkdir -p dist/ralph-cli/bin
+
+          cp packages/loop-cli/bin/ralph dist/ralph-cli/bin/ralph
+          cp packages/loop-cli/bin/ralph-loop.sh dist/ralph-cli/bin/ralph-loop
+          cp packages/loop-cli/bin/ralph-dispatch.sh dist/ralph-cli/bin/ralph-dispatch
+          cp scripts/install.sh dist/ralph-cli/install.sh
+          chmod +x dist/ralph-cli/bin/ralph dist/ralph-cli/bin/ralph-loop dist/ralph-cli/bin/ralph-dispatch dist/ralph-cli/install.sh
+
+          printf "%s\n" "$version" > dist/ralph-cli/VERSION
+          tar -C dist -czf "ralph-cli-${version}.tar.gz" ralph-cli
+          cp "ralph-cli-${version}.tar.gz" ralph-cli.tar.gz
+
+          sha256sum "ralph-cli-${version}.tar.gz" > "ralph-cli-${version}.tar.gz.sha256"
+          sha256sum ralph-cli.tar.gz > ralph-cli.tar.gz.sha256
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ralph-cli-${{ steps.meta.outputs.version }}.tar.gz
+            ralph-cli-${{ steps.meta.outputs.version }}.tar.gz.sha256
+            ralph-cli.tar.gz
+            ralph-cli.tar.gz.sha256
