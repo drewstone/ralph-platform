@@ -12,7 +12,7 @@ Incident bugfix (generate spec from incident report, then open PR on success):
   --bootstrap-audit \
   --inject-text "Prioritize root-cause, regression tests, and rollback safety." \
   --open-pr \
-  -- --max-turns 80 --audit-every 3 --audit-min-score 9.2 --audit-axis-min 8.8
+  -- --max-turns 80 --audit-every 3 --audit-min-score 9.2 --audit-axis-min 8.8 --audit-style-axis-min 8.0
 ```
 
 Feature work (no bootstrap, direct task execution):
@@ -84,7 +84,7 @@ ralph-dispatch --help
   --inject ~/code/superkabal/specs/inject/quality-bar.md \
   --inject-text "Prioritize root-cause, regression tests, and rollback safety." \
   --open-pr \
-  -- --max-turns 80 --audit-every 3 --audit-min-score 9.2 --audit-axis-min 8.8
+  -- --max-turns 80 --audit-every 3 --audit-min-score 9.2 --audit-axis-min 8.8 --audit-style-axis-min 8.0
 ```
 
 You can also dispatch from an existing spec:
@@ -118,6 +118,7 @@ The loop now expects and enforces machine-readable axis scores in audit output:
 Threshold controls:
 - `--audit-min-score`
 - `--audit-axis-min`
+- `--audit-style-axis-min`
 - `--audit-critical-axis-min`
 
 Completion is accepted only when:
@@ -126,6 +127,8 @@ Completion is accepted only when:
 3. `UNTESTED_SCOPE: NONE`
 4. audit score threshold passes
 5. all axis thresholds pass
+
+The loop prompt also explicitly permits high-confidence greenfield refactors in touched subsystems when they improve architecture quality, with a hard requirement to preserve behavior (unless spec-directed) and prove parity via tests.
 
 ## Notes
 - Dangerous mode remains hardcoded in loop execution (`--dangerously-bypass-approvals-and-sandbox`) by design.

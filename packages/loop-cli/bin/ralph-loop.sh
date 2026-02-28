@@ -24,6 +24,8 @@ Options:
   --audit-profile PROFILE  Codex profile override for audit runs.
   --audit-min-score N.N    Minimum audit score required for completion (default: 9.0).
   --audit-axis-min N.N     Minimum score required for every audit axis (default: 8.5).
+  --audit-style-axis-min N.N
+                           Minimum score for style-oriented audit axes (default: 8.0).
   --audit-critical-axis-min N.N
                            Minimum score for critical audit axes (default: same as --audit-min-score).
   --audit-codex-arg ARG    Extra argument for audit `codex exec` (repeatable).
@@ -130,6 +132,8 @@ Core requirements:
    - ARCHITECTURE.md
    - Add another doc only if strictly necessary.
 5) Fresh-context rule: assume no memory from earlier turns except repository files.
+6) Refactor mandate: if you are highly confident a touched subsystem should be redesigned, prefer the cleaner greenfield architecture over incremental patching when it materially improves correctness, clarity, or maintainability.
+7) Refactor safety rule: for any substantial refactor, preserve externally observable behavior unless the spec requires change, and prove parity with tests and concrete migration notes.
 
 Process for this turn:
 1) Read SPEC file first: $SPEC_FILE
@@ -236,6 +240,7 @@ Audit requirements:
    - Score threshold for completion is: $AUDIT_MIN_SCORE
    - Axis thresholds:
      - global axis floor: $AUDIT_AXIS_MIN
+     - style axis floor: $AUDIT_STYLE_AXIS_MIN
      - critical axis floor: $AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE
    - Required axis scores (all must be present):
      - code_quality
@@ -249,6 +254,8 @@ Audit requirements:
      - spec_product_fidelity
      - operational_readiness
    - Explicitly justify why the score is what it is (what reduced it, what would raise it).
+   - Scoring discipline: prioritize security, correctness, reliability, evidence quality, and operational readiness over stylistic preferences.
+   - Style-only concerns (naming/aesthetics/subjective structure without concrete risk or measurable cost) must be marked Low severity and must not drive FAIL unless they create real maintainability/perf/correctness impact.
    - If score is below threshold, include a targeted "Threshold Gap" section:
      - minimum changes required to pass threshold next turn
      - blocked-by dependencies (if any)
@@ -349,6 +356,17 @@ axis_is_critical() {
   return 1
 }
 
+axis_is_style() {
+  local axis="$1"
+  local style
+  for style in "${AUDIT_STYLE_AXES[@]}"; do
+    if [[ "$style" == "$axis" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 evaluate_audit_axis_thresholds() {
   local audit_file="$1"
   local axis score threshold
@@ -366,6 +384,8 @@ evaluate_audit_axis_thresholds() {
     threshold="$AUDIT_AXIS_MIN"
     if axis_is_critical "$axis"; then
       threshold="$AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE"
+    elif axis_is_style "$axis"; then
+      threshold="$AUDIT_STYLE_AXIS_MIN"
     fi
 
     if ! score_meets_threshold "$score" "$threshold"; then
@@ -547,6 +567,7 @@ EOF
     --audit-every "$AUDIT_EVERY"
     --audit-min-score "$AUDIT_MIN_SCORE"
     --audit-axis-min "$AUDIT_AXIS_MIN"
+    --audit-style-axis-min "$AUDIT_STYLE_AXIS_MIN"
   )
   if [[ -n "$AUDIT_CRITICAL_AXIS_MIN" ]]; then
     child_args+=(--audit-critical-axis-min "$AUDIT_CRITICAL_AXIS_MIN")
@@ -646,6 +667,7 @@ AUDIT_MODEL=""
 AUDIT_PROFILE=""
 AUDIT_MIN_SCORE="9.0"
 AUDIT_AXIS_MIN="8.5"
+AUDIT_STYLE_AXIS_MIN="8.0"
 AUDIT_CRITICAL_AXIS_MIN=""
 AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE=""
 AUDIT_AXES=(
@@ -665,6 +687,11 @@ AUDIT_CRITICAL_AXES=(
   test_rigor_evidence
   security_tenant_isolation
   reliability_failure_semantics
+)
+AUDIT_STYLE_AXES=(
+  code_quality
+  succinct_implementation
+  modularity_abstractions
 )
 MOVIE_MODE="false"
 MOVIE_SESSION="ralph-movie"
@@ -740,6 +767,10 @@ while [[ $# -gt 0 ]]; do
       AUDIT_AXIS_MIN="${2:-}"
       shift 2
       ;;
+    --audit-style-axis-min)
+      AUDIT_STYLE_AXIS_MIN="${2:-}"
+      shift 2
+      ;;
     --audit-critical-axis-min)
       AUDIT_CRITICAL_AXIS_MIN="${2:-}"
       shift 2
@@ -788,6 +819,7 @@ done
 [[ "$AUDIT_EVERY" =~ ^[0-9]+$ ]] || die "--audit-every must be a non-negative integer"
 [[ "$AUDIT_MIN_SCORE" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--audit-min-score must be numeric (e.g. 9.0)"
 [[ "$AUDIT_AXIS_MIN" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--audit-axis-min must be numeric (e.g. 8.5)"
+[[ "$AUDIT_STYLE_AXIS_MIN" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--audit-style-axis-min must be numeric (e.g. 8.0)"
 if [[ -n "$AUDIT_CRITICAL_AXIS_MIN" ]]; then
   [[ "$AUDIT_CRITICAL_AXIS_MIN" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--audit-critical-axis-min must be numeric (e.g. 9.2)"
 fi
@@ -802,6 +834,7 @@ fi
 
 awk -v v="$AUDIT_MIN_SCORE" 'BEGIN { exit !(v+0 >= 0 && v+0 <= 10) }' || die "--audit-min-score must be between 0 and 10"
 awk -v v="$AUDIT_AXIS_MIN" 'BEGIN { exit !(v+0 >= 0 && v+0 <= 10) }' || die "--audit-axis-min must be between 0 and 10"
+awk -v v="$AUDIT_STYLE_AXIS_MIN" 'BEGIN { exit !(v+0 >= 0 && v+0 <= 10) }' || die "--audit-style-axis-min must be between 0 and 10"
 awk -v v="$AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE" 'BEGIN { exit !(v+0 >= 0 && v+0 <= 10) }' || die "--audit-critical-axis-min must be between 0 and 10"
 
 WORKDIR="$(resolve_path "$WORKDIR")"
@@ -840,6 +873,7 @@ echo "stop_token: $STOP_TOKEN"
 echo "audit_every: $AUDIT_EVERY"
 echo "audit_min_score: $AUDIT_MIN_SCORE"
 echo "audit_axis_min: $AUDIT_AXIS_MIN"
+echo "audit_style_axis_min: $AUDIT_STYLE_AXIS_MIN"
 echo "audit_critical_axis_min: $AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE"
 echo "pretty_stream: $PRETTY_STREAM"
 if [[ -n "$AUDIT_SYSTEM_PROMPT_FILE" ]]; then
@@ -1029,7 +1063,7 @@ for ((turn=1; turn<=MAX_TURNS; turn++)); do
     echo "Stop token detected on turn $turn."
     if (( AUDIT_EVERY > 0 )); then
       echo "Audit score accepted: $LAST_AUDIT_SCORE (threshold: $AUDIT_MIN_SCORE)"
-      echo "Audit axis thresholds accepted: min=$AUDIT_AXIS_MIN critical_min=$AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE"
+      echo "Audit axis thresholds accepted: min=$AUDIT_AXIS_MIN style_min=$AUDIT_STYLE_AXIS_MIN critical_min=$AUDIT_CRITICAL_AXIS_MIN_EFFECTIVE"
     fi
     echo "Last message: $last_file"
     exit 0
