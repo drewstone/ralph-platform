@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createWriteStream, mkdirSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -67,9 +67,20 @@ interface ForgeState {
 }
 
 interface DashboardState {
+  selectedRepo: string;
+  defaultRepo: string;
+  knownRepos: string[];
   snapshot: RunSnapshot;
   history: RunCard[];
   forge: ForgeState;
+  stateError?: string;
+}
+
+interface RepoStateCache {
+  snapshot: RunSnapshot;
+  history: RunCard[];
+  lastRefreshAtMs: number;
+  refreshPromise?: Promise<void>;
 }
 
 interface CreateForgeRunRequest {
@@ -175,7 +186,156 @@ function parseCreateRunRequest(body: unknown): CreateForgeRunRequest {
   return request;
 }
 
-const targetRepo = getArg("--target") ?? process.env.TARGET_REPO ?? process.cwd();
+function normalizeRepoQueryValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? path.resolve(trimmed) : undefined;
+}
+
+function resolveRepoQuery(value: unknown): string {
+  return normalizeRepoQueryValue(value) ?? defaultRepo;
+}
+
+function runGit(repoPath: string, args: string[]): string {
+  return execFileSync("git", ["-C", repoPath, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+
+interface WorkspaceFileEntry {
+  path: string;
+  status: string;
+}
+
+interface WorkspaceSnapshot {
+  repo: string;
+  branch: string;
+  changedFiles: WorkspaceFileEntry[];
+  remoteUrl?: string;
+  remoteSlug?: string;
+  gitUser?: string;
+}
+
+type WorkspaceOpenTarget = "finder" | "cursor" | "vscode" | "xcode" | "warp" | "terminal" | "copy_path";
+
+function loadWorkspaceSnapshot(repoPath: string, limit = 400): WorkspaceSnapshot {
+  const resolved = path.resolve(repoPath);
+  const raw = runGit(resolved, ["status", "--porcelain", "--branch"]);
+  const lines = raw.split(/\r?\n/).filter((line) => line.length > 0);
+
+  let branch = "unknown";
+  const changedFiles: WorkspaceFileEntry[] = [];
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      branch = line.slice(3).trim();
+      continue;
+    }
+    if (changedFiles.length >= limit) {
+      continue;
+    }
+    const status = line.slice(0, 2).trim() || "??";
+    const rest = line.slice(3).trim();
+    const filePath = rest.includes(" -> ") ? rest.split(" -> ").at(-1) || rest : rest;
+    changedFiles.push({ path: filePath, status });
+  }
+
+  let remoteUrl: string | undefined;
+  let remoteSlug: string | undefined;
+  let gitUser: string | undefined;
+
+  try {
+    remoteUrl = runGit(resolved, ["remote", "get-url", "origin"]).trim() || undefined;
+  } catch {
+    remoteUrl = undefined;
+  }
+
+  if (remoteUrl) {
+    const ghSsh = remoteUrl.match(/^git@github\.com:(.+?)(?:\.git)?$/i);
+    const ghHttp = remoteUrl.match(/^https?:\/\/github\.com\/(.+?)(?:\.git)?$/i);
+    remoteSlug = ghSsh?.[1] || ghHttp?.[1] || undefined;
+  }
+
+  try {
+    gitUser = runGit(resolved, ["config", "user.name"]).trim() || undefined;
+  } catch {
+    gitUser = undefined;
+  }
+
+  return { repo: resolved, branch, changedFiles, remoteUrl, remoteSlug, gitUser };
+}
+
+function loadWorkspaceDiff(repoPath: string, filePath: string): string {
+  const resolved = path.resolve(repoPath);
+  const normalizedFile = filePath.trim();
+  if (!normalizedFile) {
+    throw new Error("file query is required");
+  }
+
+  let diff = "";
+  try {
+    diff = runGit(resolved, ["diff", "--", normalizedFile]);
+  } catch {
+    diff = "";
+  }
+  if (!diff.trim()) {
+    try {
+      diff = runGit(resolved, ["diff", "--cached", "--", normalizedFile]);
+    } catch {
+      diff = "";
+    }
+  }
+
+  if (!diff.trim()) {
+    return `No diff available for ${normalizedFile}`;
+  }
+  return diff.slice(0, 250000);
+}
+
+function parseOpenWorkspaceRequest(body: unknown): { repo: string; target: WorkspaceOpenTarget } {
+  const input = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const repoRaw = normalizeOptionalString(input.repo);
+  const targetRaw = normalizeOptionalString(input.target);
+  if (!repoRaw) {
+    throw new Error("repo is required");
+  }
+
+  const allowed: WorkspaceOpenTarget[] = ["finder", "cursor", "vscode", "xcode", "warp", "terminal", "copy_path"];
+  if (!targetRaw || !allowed.includes(targetRaw as WorkspaceOpenTarget)) {
+    throw new Error("invalid target");
+  }
+
+  return { repo: path.resolve(repoRaw), target: targetRaw as WorkspaceOpenTarget };
+}
+
+function openWorkspaceInTarget(repoPath: string, target: WorkspaceOpenTarget): void {
+  const resolved = path.resolve(repoPath);
+  if (target === "copy_path") {
+    const result = spawnSync("pbcopy", [], { input: resolved, encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || "failed to copy path");
+    }
+    return;
+  }
+
+  const appMap: Record<Exclude<WorkspaceOpenTarget, "copy_path">, string | undefined> = {
+    finder: undefined,
+    cursor: "Cursor",
+    vscode: "Visual Studio Code",
+    xcode: "Xcode",
+    warp: "Warp",
+    terminal: "Terminal"
+  };
+
+  const app = appMap[target];
+  if (app) {
+    execFileSync("open", ["-a", app, resolved], { stdio: ["ignore", "ignore", "pipe"] });
+  } else {
+    execFileSync("open", [resolved], { stdio: ["ignore", "ignore", "pipe"] });
+  }
+}
+
+const defaultRepo = path.resolve(getArg("--target") ?? process.env.TARGET_REPO ?? process.env.INIT_CWD ?? process.cwd());
 const port = Number.parseInt(getArg("--port") ?? process.env.PORT ?? "4310", 10);
 const pollMs = Number.parseInt(getArg("--poll-ms") ?? process.env.POLL_MS ?? "2000", 10);
 const mainInputCostPer1M = Number.parseFloat(getArg("--main-input-cost-per-1m") ?? process.env.MAIN_INPUT_COST_PER_1M ?? "");
@@ -351,6 +511,64 @@ function loadHistory(repoPath: string, limit = 50): RunCard[] {
   }>;
 
   return rows.map(fromDbRow);
+}
+
+function listKnownRepos(limit = 200): string[] {
+  const rows = db
+    .prepare(
+      `
+      SELECT repo_path
+      FROM (
+        SELECT target_repo AS repo_path, updated_at FROM run_cards
+        UNION ALL
+        SELECT repo AS repo_path, updated_at FROM forge_runs
+      )
+      GROUP BY repo_path
+      ORDER BY MAX(updated_at) DESC
+      LIMIT ?
+    `
+    )
+    .all(limit) as Array<{ repo_path: string }>;
+
+  const repos = new Set<string>([defaultRepo]);
+  for (const row of rows) {
+    repos.add(path.resolve(row.repo_path));
+  }
+  for (const repoPath of repoStateCache.keys()) {
+    repos.add(repoPath);
+  }
+  return [...repos];
+}
+
+function createEmptySnapshot(repoPath: string): RunSnapshot {
+  return {
+    runId: `${path.basename(repoPath)}-bootstrap`,
+    generatedAt: nowIso(),
+    targetRepo: repoPath,
+    turns: [],
+    audits: [],
+    nodes: [],
+    edges: [],
+    repo: { path: repoPath, hasGit: false },
+    metrics: {
+      turnCount: 0,
+      auditCount: 0,
+      doneDetected: false,
+      mainInputTokens: 0,
+      mainOutputTokens: 0,
+      mainCacheReadTokens: 0,
+      mainCacheWriteTokens: 0,
+      auditInputTokens: 0,
+      auditOutputTokens: 0,
+      auditCacheReadTokens: 0,
+      auditCacheWriteTokens: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheReadTokens: 0,
+      totalCacheWriteTokens: 0,
+      totalTokens: 0
+    }
+  };
 }
 
 function statusFromSnapshot(data: RunSnapshot): "running" | "done" | "idle" {
@@ -653,7 +871,7 @@ function createDefaultBranchName(runId: string): string {
   return `ralph/forge-${stamp}-${runId.slice(0, 8)}`;
 }
 
-function buildDispatchArgs(request: CreateForgeRunRequest, runId: string, branchName: string): string[] {
+function buildDispatchArgs(request: CreateForgeRunRequest, branchName: string): string[] {
   const args: string[] = ["--repo", request.repo];
 
   if (request.specFile) {
@@ -785,53 +1003,87 @@ function forgeState(): ForgeState {
   };
 }
 
-let history: RunCard[] = loadHistory(targetRepo, 50);
-let snapshot: RunSnapshot = {
-  runId: `${path.basename(targetRepo)}-bootstrap`,
-  generatedAt: nowIso(),
-  targetRepo,
-  turns: [],
-  audits: [],
-  nodes: [],
-  edges: [],
-  repo: { path: targetRepo, hasGit: false },
-  metrics: {
-    turnCount: 0,
-    auditCount: 0,
-    doneDetected: false,
-    mainInputTokens: 0,
-    mainOutputTokens: 0,
-    mainCacheReadTokens: 0,
-    mainCacheWriteTokens: 0,
-    auditInputTokens: 0,
-    auditOutputTokens: 0,
-    auditCacheReadTokens: 0,
-    auditCacheWriteTokens: 0,
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    totalCacheReadTokens: 0,
-    totalCacheWriteTokens: 0,
-    totalTokens: 0
-  }
-};
+const repoStateCache = new Map<string, RepoStateCache>();
+const repoWatchTimestamps = new Map<string, number>();
+const watchedRepoTtlMs = 15 * 60 * 1000;
 
-function statePayload(): DashboardState {
+function touchRepo(repoPath: string): void {
+  repoWatchTimestamps.set(repoPath, Date.now());
+}
+
+function ensureRepoState(repoPath: string): RepoStateCache {
+  const resolved = path.resolve(repoPath);
+  const existing = repoStateCache.get(resolved);
+  if (existing) {
+    return existing;
+  }
+  const created: RepoStateCache = {
+    snapshot: createEmptySnapshot(resolved),
+    history: loadHistory(resolved, 50),
+    lastRefreshAtMs: 0
+  };
+  repoStateCache.set(resolved, created);
+  return created;
+}
+
+async function refreshRepoState(repoPath: string, force = false): Promise<RepoStateCache> {
+  const resolved = path.resolve(repoPath);
+  const state = ensureRepoState(resolved);
+  const ageMs = Date.now() - state.lastRefreshAtMs;
+  if (!force && ageMs < pollMs) {
+    return state;
+  }
+  if (state.refreshPromise) {
+    await state.refreshPromise;
+    return state;
+  }
+
+  state.refreshPromise = (async () => {
+    const next = await scanRepo(resolved, {
+      ...(Number.isFinite(mainInputCostPer1M) ? { mainInputCostPer1M } : {}),
+      ...(Number.isFinite(mainOutputCostPer1M) ? { mainOutputCostPer1M } : {}),
+      ...(Number.isFinite(auditInputCostPer1M) ? { auditInputCostPer1M } : {}),
+      ...(Number.isFinite(auditOutputCostPer1M) ? { auditOutputCostPer1M } : {})
+    });
+    state.snapshot = next;
+    upsertRunCard(next);
+    appendSnapshot(next);
+    state.history = loadHistory(resolved, 50);
+    state.lastRefreshAtMs = Date.now();
+  })();
+
+  try {
+    await state.refreshPromise;
+  } finally {
+    state.refreshPromise = undefined;
+  }
+  return state;
+}
+
+function statePayload(repoPath: string, stateError?: string): DashboardState {
+  const resolved = path.resolve(repoPath);
+  const state = ensureRepoState(resolved);
   return {
-    snapshot,
-    history,
-    forge: forgeState()
+    selectedRepo: resolved,
+    defaultRepo,
+    knownRepos: listKnownRepos(200),
+    snapshot: state.snapshot,
+    history: state.history,
+    forge: forgeState(),
+    ...(stateError ? { stateError } : {})
   };
 }
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "..", "public")));
+const publicRoot = path.join(__dirname, "..", "public");
+app.use(express.static(publicRoot));
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
-function broadcastState(): void {
-  const payload = JSON.stringify({ type: "state", data: statePayload() });
+function broadcastSignal(): void {
+  const payload = JSON.stringify({ type: "signal", at: nowIso() });
   for (const client of wss.clients) {
     if (client.readyState === client.OPEN) {
       client.send(payload);
@@ -839,20 +1091,36 @@ function broadcastState(): void {
   }
 }
 
-async function refreshSnapshot(): Promise<void> {
-  const next = await scanRepo(targetRepo, {
-    ...(Number.isFinite(mainInputCostPer1M) ? { mainInputCostPer1M } : {}),
-    ...(Number.isFinite(mainOutputCostPer1M) ? { mainOutputCostPer1M } : {}),
-    ...(Number.isFinite(auditInputCostPer1M) ? { auditInputCostPer1M } : {}),
-    ...(Number.isFinite(auditOutputCostPer1M) ? { auditOutputCostPer1M } : {})
-  });
-  snapshot = next;
-  upsertRunCard(next);
-  appendSnapshot(next);
-  history = loadHistory(targetRepo, 50);
+function activeForgeRepos(limit = 20): string[] {
+  const rows = db
+    .prepare(
+      `
+      SELECT DISTINCT repo
+      FROM forge_runs
+      WHERE status IN ('queued', 'running', 'paused', 'aborting')
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `
+    )
+    .all(limit) as Array<{ repo: string }>;
+  return rows.map((row) => path.resolve(row.repo));
+}
+
+function reposToRefresh(): string[] {
+  const repos = new Set<string>([defaultRepo, ...activeForgeRepos(20)]);
+  const cutoff = Date.now() - watchedRepoTtlMs;
+  for (const [repoPath, seenAt] of repoWatchTimestamps.entries()) {
+    if (seenAt >= cutoff) {
+      repos.add(repoPath);
+      continue;
+    }
+    repoWatchTimestamps.delete(repoPath);
+  }
+  return [...repos];
 }
 
 function beginRunProcess(run: ForgeRun): void {
+  touchRepo(run.repo);
   const child = spawn(dispatchBin, run.commandArgs, {
     cwd: run.repo,
     env: process.env,
@@ -870,7 +1138,7 @@ function beginRunProcess(run: ForgeRun): void {
     finished_at: null
   });
   appendForgeEvent(run.runId, "info", `started: ${dispatchBin} ${run.commandArgs.join(" ")}`);
-  broadcastState();
+  broadcastSignal();
 
   const logPath = path.join(run.runDir, "runner.log");
   const logStream = createWriteStream(logPath, { flags: "a" });
@@ -916,7 +1184,7 @@ function beginRunProcess(run: ForgeRun): void {
       activeRunId = null;
     }
 
-    broadcastState();
+    broadcastSignal();
     void maybeStartNextRun();
   });
 }
@@ -942,12 +1210,14 @@ async function maybeStartNextRun(): Promise<void> {
 }
 
 function createForgeRun(request: CreateForgeRunRequest, retryOf?: string): ForgeRun {
+  touchRepo(request.repo);
+  ensureRepoState(request.repo);
   const runId = randomUUID();
   const branchName = request.branchName ?? createDefaultBranchName(runId);
-  const commandArgs = buildDispatchArgs(request, runId, branchName);
+  const commandArgs = buildDispatchArgs(request, branchName);
   const run = insertForgeRun(runId, request, commandArgs, branchName, retryOf);
   enqueueRun(run.runId);
-  broadcastState();
+  broadcastSignal();
   void maybeStartNextRun();
   return run;
 }
@@ -976,7 +1246,7 @@ function pauseRun(run: ForgeRun): void {
   process.kill(child.pid, "SIGSTOP");
   patchForgeRun(run.runId, { status: "paused" });
   appendForgeEvent(run.runId, "warn", "paused by operator");
-  broadcastState();
+  broadcastSignal();
 }
 
 function resumeRun(run: ForgeRun): void {
@@ -991,7 +1261,7 @@ function resumeRun(run: ForgeRun): void {
   process.kill(child.pid, "SIGCONT");
   patchForgeRun(run.runId, { status: "running" });
   appendForgeEvent(run.runId, "info", "resumed by operator");
-  broadcastState();
+  broadcastSignal();
 }
 
 function abortRun(run: ForgeRun): void {
@@ -1003,7 +1273,7 @@ function abortRun(run: ForgeRun): void {
       error_text: "aborted while queued"
     });
     appendForgeEvent(run.runId, "warn", "aborted while queued");
-    broadcastState();
+    broadcastSignal();
     return;
   }
 
@@ -1019,20 +1289,45 @@ function abortRun(run: ForgeRun): void {
       error_text: "process not found during abort"
     });
     appendForgeEvent(run.runId, "warn", "process missing, marked aborted");
-    broadcastState();
+    broadcastSignal();
     return;
   }
 
   patchForgeRun(run.runId, { status: "aborting" });
   appendForgeEvent(run.runId, "warn", "abort requested; sending SIGTERM");
   process.kill(child.pid, "SIGTERM");
-  broadcastState();
+  broadcastSignal();
+}
+
+function deleteRun(run: ForgeRun): void {
+  if (run.status === "running" || run.status === "paused" || run.status === "aborting") {
+    throw new Error("active run cannot be deleted; abort it first");
+  }
+
+  removeQueuedRun(run.runId);
+  activeProcesses.delete(run.runId);
+
+  db.prepare("DELETE FROM forge_run_events WHERE run_id = ?").run(run.runId);
+  db.prepare("DELETE FROM forge_runs WHERE run_id = ?").run(run.runId);
+
+  const resolvedRunDir = path.resolve(run.runDir);
+  const resolvedRunsRoot = path.resolve(forgeRunsRoot);
+  if (
+    resolvedRunDir === resolvedRunsRoot ||
+    resolvedRunDir.startsWith(`${resolvedRunsRoot}${path.sep}`)
+  ) {
+    try {
+      rmSync(resolvedRunDir, { recursive: true, force: true });
+    } catch {
+      // best effort cleanup
+    }
+  }
 }
 
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    targetRepo,
+    defaultRepo,
     pollMs,
     dbPath,
     dispatchBin,
@@ -1046,12 +1341,71 @@ app.get("/health", (_req, res) => {
   });
 });
 
-app.get("/api/state", (_req, res) => {
-  res.json(statePayload());
+app.get("/api/repos", (_req, res) => {
+  res.json({
+    defaultRepo,
+    repos: listKnownRepos(500)
+  });
 });
 
-app.get("/api/runs", (_req, res) => {
-  res.json({ runs: history });
+app.get("/api/workspace", (req, res) => {
+  const repoPath = resolveRepoQuery(req.query.repo);
+  try {
+    const snapshot = loadWorkspaceSnapshot(repoPath, 500);
+    res.json(snapshot);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to load workspace";
+    res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/workspace/diff", (req, res) => {
+  const repoPath = resolveRepoQuery(req.query.repo);
+  const filePath = typeof req.query.file === "string" ? req.query.file : "";
+  try {
+    const diff = loadWorkspaceDiff(repoPath, filePath);
+    res.json({ repo: path.resolve(repoPath), file: filePath, diff });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to load diff";
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post("/api/workspace/open", (req, res) => {
+  try {
+    const request = parseOpenWorkspaceRequest(req.body);
+    openWorkspaceInTarget(request.repo, request.target);
+    res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to open workspace";
+    res.status(400).json({ error: message });
+  }
+});
+
+app.get("/api/state", async (req, res) => {
+  const repoPath = resolveRepoQuery(req.query.repo);
+  touchRepo(repoPath);
+
+  let stateError: string | undefined;
+  try {
+    await refreshRepoState(repoPath);
+  } catch (error) {
+    stateError = error instanceof Error ? error.message : "failed to refresh repo state";
+  }
+  res.json(statePayload(repoPath, stateError));
+});
+
+app.get("/api/runs", async (req, res) => {
+  const repoPath = resolveRepoQuery(req.query.repo);
+  touchRepo(repoPath);
+
+  try {
+    await refreshRepoState(repoPath);
+  } catch {
+    // Fall back to cached/db-backed history.
+  }
+  const state = ensureRepoState(repoPath);
+  res.json({ repo: repoPath, runs: state.history });
 });
 
 app.get("/api/runs/:runId/snapshots", (req, res) => {
@@ -1157,21 +1511,56 @@ app.post("/api/forge/runs/:runId/retry", (req, res) => {
   }
 });
 
+app.delete("/api/forge/runs/:runId", (req, res) => {
+  const run = loadForgeRun(req.params.runId);
+  if (!run) {
+    res.status(404).json({ error: "run not found" });
+    return;
+  }
+  try {
+    deleteRun(run);
+    broadcastSignal();
+    res.json({ ok: true, runId: run.runId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to delete run";
+    res.status(409).json({ error: message });
+  }
+});
+
+app.get("*", (req, res, next) => {
+  if (req.path === "/health" || req.path.startsWith("/api/")) {
+    next();
+    return;
+  }
+  res.sendFile(path.join(publicRoot, "index.html"));
+});
+
 wss.on("connection", (socket) => {
-  socket.send(JSON.stringify({ type: "state", data: statePayload() }));
+  socket.send(JSON.stringify({ type: "signal", at: nowIso() }));
 });
 
 async function tick(): Promise<void> {
-  try {
-    await refreshSnapshot();
-    broadcastState();
-  } catch (error) {
-    console.error("[dashboard] refresh failed", error);
+  const repos = reposToRefresh();
+  let refreshedAny = false;
+
+  for (const repoPath of repos) {
+    try {
+      await refreshRepoState(repoPath, true);
+      refreshedAny = true;
+    } catch (error) {
+      console.error(`[dashboard] refresh failed for ${repoPath}`, error);
+    }
+  }
+
+  if (refreshedAny) {
+    broadcastSignal();
   }
 }
 
 loadQueuedRunsFromDb();
 void maybeStartNextRun();
+ensureRepoState(defaultRepo);
+touchRepo(defaultRepo);
 
 await tick();
 setInterval(() => {
@@ -1180,7 +1569,7 @@ setInterval(() => {
 
 server.listen(port, () => {
   console.log(`[dashboard] listening on http://localhost:${port}`);
-  console.log(`[dashboard] target repo: ${targetRepo}`);
+  console.log(`[dashboard] default repo: ${defaultRepo}`);
   console.log(`[dashboard] sqlite db: ${dbPath}`);
   console.log(`[dashboard] dispatch bin: ${dispatchBin}`);
   if (Number.isFinite(mainInputCostPer1M) && Number.isFinite(mainOutputCostPer1M)) {
