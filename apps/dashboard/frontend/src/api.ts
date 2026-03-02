@@ -1,12 +1,25 @@
-import type { CreateRunPayload, DashboardState, RunDetails, WorkspaceOpenTarget, WorkspaceSnapshot } from "./types";
+import type { CreateRunPayload, DashboardState, GitHubAuthStatus, RunDetails, WorkspaceOpenTarget, WorkspaceSnapshot } from "./types";
 
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
-  const data = (await response.json()) as T & { error?: string };
-  if (!response.ok) {
-    throw new Error(data.error || `request failed: ${response.status}`);
+  const text = await response.text();
+  let data: (T & { error?: string }) | null = null;
+  if (text.trim().length > 0) {
+    try {
+      data = JSON.parse(text) as T & { error?: string };
+    } catch {
+      if (!response.ok) {
+        throw new Error(`request failed: ${response.status}`);
+      }
+      throw new Error("Invalid JSON response from server");
+    }
   }
-  return data;
+
+  if (!response.ok) {
+    throw new Error(data?.error || `request failed: ${response.status}`);
+  }
+
+  return (data || ({} as T)) as T;
 }
 
 export async function fetchDashboardState(repo?: string): Promise<DashboardState> {
@@ -34,6 +47,40 @@ export async function openWorkspaceTarget(repo: string, target: WorkspaceOpenTar
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ repo, target })
   });
+}
+
+export async function suggestWorkspacePaths(query: string): Promise<{ suggestions: string[] }> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  return request<{ suggestions: string[] }>(`/api/workspace/suggest?${params.toString()}`);
+}
+
+export async function pickWorkspacePath(): Promise<{ repo: string }> {
+  return request<{ repo: string }>("/api/workspace/pick", {
+    method: "POST"
+  });
+}
+
+export async function cloneWorkspace(url: string, parentDir?: string, name?: string): Promise<{ repo: string }> {
+  return request<{ repo: string }>("/api/workspace/clone", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, parentDir, name })
+  });
+}
+
+export async function fetchGitHubAuthStatus(): Promise<GitHubAuthStatus> {
+  return request<GitHubAuthStatus>("/api/auth/github");
+}
+
+export async function logoutGitHubAuth(): Promise<void> {
+  await request<{ ok: true }>("/api/auth/github/logout", {
+    method: "POST"
+  });
+}
+
+export function startGitHubAuth(): void {
+  window.location.href = "/api/auth/github/start";
 }
 
 export async function fetchRunDetails(runId: string): Promise<RunDetails> {

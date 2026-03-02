@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, mkdirSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -219,6 +219,30 @@ interface WorkspaceSnapshot {
 
 type WorkspaceOpenTarget = "finder" | "cursor" | "vscode" | "xcode" | "warp" | "terminal" | "copy_path";
 
+interface GitHubAuthStore {
+  accessToken: string;
+  tokenType?: string;
+  scope?: string;
+  login?: string;
+  name?: string;
+  avatarUrl?: string;
+  htmlUrl?: string;
+  fetchedAt: string;
+}
+
+interface GitHubUserPayload {
+  login?: string;
+  name?: string;
+  avatar_url?: string;
+  html_url?: string;
+}
+
+interface WorkspaceCloneRequest {
+  url: string;
+  parentDir?: string;
+  name?: string;
+}
+
 function loadWorkspaceSnapshot(repoPath: string, limit = 400): WorkspaceSnapshot {
   const resolved = path.resolve(repoPath);
   const raw = runGit(resolved, ["status", "--porcelain", "--branch"]);
@@ -335,6 +359,114 @@ function openWorkspaceInTarget(repoPath: string, target: WorkspaceOpenTarget): v
   }
 }
 
+function normalizeCloneRepoName(url: string): string {
+  const trimmed = url.trim().replace(/\/$/, "");
+  const last = trimmed.split("/").at(-1) || "workspace";
+  const noGit = last.replace(/\.git$/i, "") || "workspace";
+  const safe = noGit.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return safe || "workspace";
+}
+
+function parseWorkspaceCloneRequest(body: unknown): WorkspaceCloneRequest {
+  const input = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const url = normalizeOptionalString(input.url);
+  if (!url) {
+    throw new Error("clone url is required");
+  }
+  return {
+    url,
+    parentDir: normalizeOptionalString(input.parentDir),
+    name: normalizeOptionalString(input.name)
+  };
+}
+
+function cloneWorkspace(request: WorkspaceCloneRequest, fallbackParentDir: string): { repo: string } {
+  const targetParent = path.resolve(request.parentDir || fallbackParentDir);
+  const targetName = request.name || normalizeCloneRepoName(request.url);
+  const targetRepo = path.join(targetParent, targetName);
+
+  if (existsSync(targetRepo)) {
+    throw new Error(`target path already exists: ${targetRepo}`);
+  }
+
+  mkdirSync(targetParent, { recursive: true });
+  execFileSync("git", ["clone", request.url, targetRepo], { stdio: ["ignore", "pipe", "pipe"] });
+  return { repo: path.resolve(targetRepo) };
+}
+
+function pickWorkspaceDirectory(): string {
+  if (process.platform !== "darwin") {
+    throw new Error("folder picker is currently supported on macOS only");
+  }
+
+  const result = spawnSync("osascript", [
+    "-e",
+    'POSIX path of (choose folder with prompt "Select a repository folder")'
+  ], { encoding: "utf8" });
+
+  if (result.status !== 0) {
+    const stderr = (result.stderr || "").trim();
+    if (stderr.includes("User canceled")) {
+      throw new Error("folder selection canceled");
+    }
+    throw new Error(stderr || "failed to pick folder");
+  }
+
+  const picked = (result.stdout || "").trim();
+  if (!picked) {
+    throw new Error("folder selection canceled");
+  }
+
+  return path.resolve(picked.replace(/\/$/, ""));
+}
+
+function listWorkspaceSuggestions(queryRaw: string, baseRepo: string): string[] {
+  const query = queryRaw.trim().toLowerCase();
+  if (!query) {
+    return [];
+  }
+
+  const out = new Set<string>();
+  const candidates = new Set<string>(listKnownRepos(400));
+  const home = homedir();
+  const roots = [path.dirname(baseRepo), path.join(home, "code"), path.join(home, "webb"), home];
+
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    candidates.add(path.resolve(root));
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries.slice(0, 250)) {
+      const full = path.join(root, entry);
+      try {
+        if (!statSync(full).isDirectory()) continue;
+        candidates.add(full);
+        if (existsSync(path.join(full, ".git"))) {
+          candidates.add(full);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const normalized = path.resolve(candidate);
+    const name = path.basename(normalized).toLowerCase();
+    if (normalized.toLowerCase().includes(query) || name.includes(query)) {
+      out.add(normalized);
+    }
+    if (out.size >= 30) break;
+  }
+
+  return [...out].sort((a, b) => a.localeCompare(b));
+}
+
 const defaultRepo = path.resolve(getArg("--target") ?? process.env.TARGET_REPO ?? process.env.INIT_CWD ?? process.cwd());
 const port = Number.parseInt(getArg("--port") ?? process.env.PORT ?? "4310", 10);
 const pollMs = Number.parseInt(getArg("--poll-ms") ?? process.env.POLL_MS ?? "2000", 10);
@@ -357,6 +489,70 @@ const forgeRunsRoot =
   getArg("--forge-runs-dir") ??
   process.env.RALPH_FORGE_RUNS_DIR ??
   path.join(homedir(), ".ralph-platform", "forge-runs");
+const githubClientId = getArg("--github-client-id") ?? process.env.GITHUB_CLIENT_ID ?? "";
+const githubClientSecret = getArg("--github-client-secret") ?? process.env.GITHUB_CLIENT_SECRET ?? "";
+const githubCallbackUrl =
+  getArg("--github-callback-url") ?? process.env.GITHUB_CALLBACK_URL ?? `http://localhost:${port}/api/auth/github/callback`;
+const githubAuthPath =
+  getArg("--github-auth-file") ??
+  process.env.RALPH_GITHUB_AUTH_FILE ??
+  path.join(homedir(), ".ralph-platform", "github-auth.json");
+
+const pendingGithubStates = new Map<string, number>();
+let githubAuth: GitHubAuthStore | null = null;
+
+function loadGithubAuth(): GitHubAuthStore | null {
+  if (!existsSync(githubAuthPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(githubAuthPath, "utf8")) as GitHubAuthStore;
+    if (!parsed?.accessToken) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveGithubAuth(next: GitHubAuthStore): void {
+  mkdirSync(path.dirname(githubAuthPath), { recursive: true });
+  writeFileSync(githubAuthPath, JSON.stringify(next, null, 2));
+  githubAuth = next;
+}
+
+function clearGithubAuth(): void {
+  githubAuth = null;
+  try {
+    rmSync(githubAuthPath, { force: true });
+  } catch {
+    // no-op
+  }
+}
+
+function githubAuthStatus(): {
+  configured: boolean;
+  connected: boolean;
+  callbackUrl: string;
+  user?: { login?: string; name?: string; avatarUrl?: string; htmlUrl?: string };
+} {
+  const configured = Boolean(githubClientId && githubClientSecret);
+  const connected = Boolean(githubAuth?.accessToken);
+  return {
+    configured,
+    connected,
+    callbackUrl: githubCallbackUrl,
+    ...(connected
+      ? {
+          user: {
+            login: githubAuth?.login,
+            name: githubAuth?.name,
+            avatarUrl: githubAuth?.avatarUrl,
+            htmlUrl: githubAuth?.htmlUrl
+          }
+        }
+      : {})
+  };
+}
+
+githubAuth = loadGithubAuth();
 
 mkdirSync(path.dirname(dbPath), { recursive: true });
 mkdirSync(forgeRunsRoot, { recursive: true });
@@ -1076,8 +1272,10 @@ function statePayload(repoPath: string, stateError?: string): DashboardState {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+const distRoot = path.join(__dirname, "..", "dist");
 const publicRoot = path.join(__dirname, "..", "public");
-app.use(express.static(publicRoot));
+const webRoot = existsSync(path.join(distRoot, "index.html")) ? distRoot : publicRoot;
+app.use(express.static(webRoot));
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
@@ -1348,6 +1546,129 @@ app.get("/api/repos", (_req, res) => {
   });
 });
 
+app.get("/api/auth/github", (_req, res) => {
+  res.json(githubAuthStatus());
+});
+
+app.get("/api/auth/github/start", (req, res) => {
+  if (!githubClientId || !githubClientSecret) {
+    res.status(400).json({ error: "github oauth is not configured" });
+    return;
+  }
+
+  const state = randomUUID();
+  pendingGithubStates.set(state, Date.now());
+  const params = new URLSearchParams({
+    client_id: githubClientId,
+    redirect_uri: githubCallbackUrl,
+    scope: "repo read:user",
+    state
+  });
+
+  if (req.query.redirect === "json") {
+    res.json({ url: `https://github.com/login/oauth/authorize?${params.toString()}` });
+    return;
+  }
+
+  res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
+});
+
+app.get("/api/auth/github/callback", async (req, res) => {
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  if (!code || !state || !pendingGithubStates.has(state)) {
+    res.status(400).send("Invalid GitHub OAuth callback");
+    return;
+  }
+
+  pendingGithubStates.delete(state);
+
+  try {
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        client_id: githubClientId,
+        client_secret: githubClientSecret,
+        code,
+        redirect_uri: githubCallbackUrl,
+        state
+      })
+    });
+
+    const tokenPayload = (await tokenResponse.json()) as {
+      access_token?: string;
+      token_type?: string;
+      scope?: string;
+      error?: string;
+    };
+
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      throw new Error(tokenPayload.error || "github token exchange failed");
+    }
+
+    const userResponse = await fetch("https://api.github.com/user", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${tokenPayload.access_token}`,
+        "User-Agent": "ralph-dashboard"
+      }
+    });
+    const userPayload = (await userResponse.json()) as GitHubUserPayload;
+
+    saveGithubAuth({
+      accessToken: tokenPayload.access_token,
+      tokenType: tokenPayload.token_type,
+      scope: tokenPayload.scope,
+      login: userPayload.login,
+      name: userPayload.name,
+      avatarUrl: userPayload.avatar_url,
+      htmlUrl: userPayload.html_url,
+      fetchedAt: nowIso()
+    });
+
+    res.redirect("/");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "github oauth failed";
+    res.status(500).send(`GitHub OAuth failed: ${message}`);
+  }
+});
+
+app.post("/api/auth/github/logout", (_req, res) => {
+  clearGithubAuth();
+  res.json({ ok: true });
+});
+
+app.get("/api/workspace/suggest", (req, res) => {
+  const query = typeof req.query.q === "string" ? req.query.q : "";
+  const suggestions = listWorkspaceSuggestions(query, defaultRepo);
+  res.json({ suggestions });
+});
+
+app.post("/api/workspace/pick", (_req, res) => {
+  try {
+    const repo = pickWorkspaceDirectory();
+    res.json({ repo });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to pick workspace";
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post("/api/workspace/clone", (req, res) => {
+  try {
+    const request = parseWorkspaceCloneRequest(req.body);
+    const cloned = cloneWorkspace(request, path.dirname(defaultRepo));
+    res.status(201).json(cloned);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "failed to clone workspace";
+    res.status(400).json({ error: message });
+  }
+});
+
 app.get("/api/workspace", (req, res) => {
   const repoPath = resolveRepoQuery(req.query.repo);
   try {
@@ -1532,7 +1853,7 @@ app.get("*", (req, res, next) => {
     next();
     return;
   }
-  res.sendFile(path.join(publicRoot, "index.html"));
+  res.sendFile(path.join(webRoot, "index.html"));
 });
 
 wss.on("connection", (socket) => {

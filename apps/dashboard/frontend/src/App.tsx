@@ -2,34 +2,43 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import {
   Archive,
   ExternalLink,
+  FolderSearch,
+  Github,
+  GitFork,
   Menu,
+  Moon,
   Pause,
   Play,
   RefreshCw,
   Send,
-  SquarePen,
   Trash2,
   Undo2,
+  Sun,
   XCircle
 } from "lucide-react";
 import {
+  cloneWorkspace,
+  fetchGitHubAuthStatus,
   deleteRun,
   fetchDashboardState,
   fetchRunDetails,
   fetchWorkspaceDiff,
   fetchWorkspaceSnapshot,
+  logoutGitHubAuth,
   openSignalSocket,
   openWorkspaceTarget,
+  pickWorkspacePath,
   queueRun,
+  startGitHubAuth,
+  suggestWorkspacePaths,
   runAction
 } from "./api";
 import { RunGraph } from "./components/RunGraph";
 import { Sidebar } from "./components/Sidebar";
-import type { DashboardState, ForgeRun, RunDetails, WorkspaceOpenTarget, WorkspaceSnapshot } from "./types";
+import type { DashboardState, ForgeRun, GitHubAuthStatus, RunDetails, WorkspaceOpenTarget, WorkspaceSnapshot } from "./types";
 import { compactText, formatInt, formatUsd, lanes, repoName, runSummary, sortRuns, statusBucket, type LaneId } from "./utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -43,6 +52,7 @@ import { cn } from "@/lib/utils";
 type SortMode = "updated_desc" | "created_desc" | "created_asc" | "status";
 type SidePanelTab = "files" | "diff" | "inspector";
 type InspectorTab = "summary" | "graph" | "events" | "log" | "meta";
+type WorkspaceDialogTab = "local" | "clone" | "browse";
 type BoolMap = Record<string, boolean>;
 type StringMap = Record<string, string>;
 
@@ -84,6 +94,13 @@ function prettyTimestamp(value?: string): string {
   return at.toLocaleString();
 }
 
+function pathDir(value: string): string {
+  const normalized = value.trim().replace(/\/$/, "");
+  const index = normalized.lastIndexOf("/");
+  if (index <= 0) return normalized || "/";
+  return normalized.slice(0, index);
+}
+
 function mergeRepos(defaultRepo: string | undefined, pinned: string[], known: string[]): string[] {
   const ordered = [defaultRepo || "", ...pinned, ...known];
   const seen = new Set<string>();
@@ -97,6 +114,53 @@ function mergeRepos(defaultRepo: string | undefined, pinned: string[], known: st
   return out;
 }
 
+function normalizeCloneName(url: string): string {
+  const trimmed = url.trim().replace(/\/$/, "");
+  if (!trimmed) return "";
+  const parts = trimmed.split("/");
+  const tail = parts[parts.length - 1] || "";
+  return tail.replace(/\.git$/i, "");
+}
+
+function inferComposerDefaults(message: string, repo: string, branchHint?: string): {
+  branchName: string;
+  baseBranch: string;
+  worktree: boolean;
+  openPr: boolean;
+  noPush: boolean;
+} {
+  const text = message.toLowerCase();
+  const slug = (message || repoName(repo))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .split("-")
+    .filter(Boolean)
+    .slice(0, 6)
+    .join("-") || "update";
+
+  const prefix = /(hotfix|bug|fix|issue|regression|broken)/.test(text)
+    ? "fix"
+    : /(refactor|cleanup|simplify|reorg)/.test(text)
+      ? "refactor"
+      : /(docs|readme|guide)/.test(text)
+        ? "docs"
+        : /(test|coverage|qa)/.test(text)
+          ? "test"
+          : /(launch|marketing|video|release)/.test(text)
+            ? "launch"
+            : "feat";
+
+  const baseBranch = branchHint && branchHint !== "unknown" ? branchHint : "main";
+  return {
+    branchName: `ralph/${prefix}-${slug}`,
+    baseBranch,
+    worktree: !/(same\s+branch|in\s+place)/.test(text),
+    openPr: /(open\s+pr|create\s+pr|ready\s+to\s+merge|ship\b|merge\b)/.test(text),
+    noPush: /(spike|explore|experimental|wip|draft)/.test(text)
+  };
+}
+
 function statusBadgeVariant(status: ForgeRun["status"]): "success" | "warning" | "danger" | "secondary" {
   const bucket = statusBucket(status);
   if (bucket === "done") return "success";
@@ -104,6 +168,18 @@ function statusBadgeVariant(status: ForgeRun["status"]): "success" | "warning" |
   if (bucket === "canceled") return "danger";
   return "secondary";
 }
+
+const openTargetLabels: Record<WorkspaceOpenTarget, string> = {
+  finder: "Finder",
+  cursor: "Cursor",
+  vscode: "VS Code",
+  xcode: "Xcode",
+  warp: "Warp",
+  terminal: "Terminal",
+  copy_path: "Copy path"
+};
+
+const quickRunPrompts = ["Build feature + tests", "Debug + regression fix"];
 
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
@@ -129,9 +205,13 @@ export function App() {
   const [composerBranch, setComposerBranch] = useState("");
   const [composerBaseBranch, setComposerBaseBranch] = useState("main");
   const [composerLoopArgs, setComposerLoopArgs] = useState("");
+  const [composerWorktree, setComposerWorktree] = useState(true);
+  const [composerOpenPr, setComposerOpenPr] = useState(false);
+  const [composerNoPush, setComposerNoPush] = useState(false);
   const [showComposerAdvanced, setShowComposerAdvanced] = useState(false);
   const [composerSubmitting, setComposerSubmitting] = useState(false);
 
+  const [themeMode, setThemeMode] = useStoredValue<"light" | "dark" | "system">("ralph.dashboard.theme", "dark");
   const [sidebarCollapsed, setSidebarCollapsed] = useStoredValue<boolean>("ralph.sidebar.collapsed", false);
   const [sidebarWidth, setSidebarWidth] = useStoredValue<number>("ralph.sidebar.width", 300);
   const [archivedChats, setArchivedChats] = useStoredValue<BoolMap>("ralph.archived.chats", {});
@@ -145,6 +225,8 @@ export function App() {
   const [workspaceByRepo, setWorkspaceByRepo] = useState<Record<string, WorkspaceSnapshot>>({});
   const [workspaceError, setWorkspaceError] = useState("");
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [githubAuth, setGitHubAuth] = useState<GitHubAuthStatus | null>(null);
+  const [githubLoading, setGitHubLoading] = useState(false);
 
   const [selectedDiffFileByRepo, setSelectedDiffFileByRepo] = useStoredValue<StringMap>("ralph.workspace.selected.diff", {});
   const [currentDiff, setCurrentDiff] = useState("");
@@ -153,7 +235,15 @@ export function App() {
   const [openTarget, setOpenTarget] = useState<WorkspaceOpenTarget>("finder");
   const [openingTarget, setOpeningTarget] = useState(false);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
+  const [workspaceDialogTab, setWorkspaceDialogTab] = useState<WorkspaceDialogTab>("local");
   const [workspaceDraftPath, setWorkspaceDraftPath] = useState("");
+  const [workspaceSuggestions, setWorkspaceSuggestions] = useState<string[]>([]);
+  const [workspaceSuggestionsLoading, setWorkspaceSuggestionsLoading] = useState(false);
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [cloneParentDir, setCloneParentDir] = useState("");
+  const [cloneName, setCloneName] = useState("");
+  const [cloneSubmitting, setCloneSubmitting] = useState(false);
+  const [browsePicking, setBrowsePicking] = useState(false);
 
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const refreshingRef = useRef(false);
@@ -204,12 +294,19 @@ export function App() {
   const selectedDiffFile = activeRepo ? selectedDiffFileByRepo[activeRepo] || "" : "";
 
   const canInspect = Boolean(selectedRun || dashboard?.forge.activeRunId);
+  const effectiveThemeMode: "light" | "dark" = themeMode === "light" ? "light" : "dark";
 
   useEffect(() => {
     if (sidePanelTab === "inspector" && !canInspect) {
       setSidePanelTab("files");
     }
   }, [sidePanelTab, canInspect]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const useDark = effectiveThemeMode === "dark";
+    root.classList.toggle("dark", useDark);
+  }, [effectiveThemeMode]);
 
   useEffect(() => {
     if (!selectedRunId && filteredRuns.length > 0) {
@@ -261,6 +358,7 @@ export function App() {
 
   useEffect(() => {
     void refreshState();
+    void refreshGitHubStatus();
     const interval = window.setInterval(() => {
       void refreshState();
     }, 5000);
@@ -279,6 +377,44 @@ export function App() {
     if (!activeRepo) return;
     void refreshWorkspace(activeRepo);
   }, [activeRepo]);
+
+  useEffect(() => {
+    if (!workspaceDialogOpen || workspaceDialogTab !== "local") return;
+    const query = workspaceDraftPath.trim();
+    if (query.length < 2) {
+      setWorkspaceSuggestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      setWorkspaceSuggestionsLoading(true);
+      void suggestWorkspacePaths(query)
+        .then((response) => {
+          if (cancelled) return;
+          setWorkspaceSuggestions(response.suggestions || []);
+        })
+        .catch(() => {
+          if (!cancelled) setWorkspaceSuggestions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setWorkspaceSuggestionsLoading(false);
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [workspaceDialogOpen, workspaceDialogTab, workspaceDraftPath]);
+
+  useEffect(() => {
+    if (!workspaceDialogOpen) return;
+    if (!cloneParentDir) {
+      const fallback = scopeRepo !== "__all__" ? pathDir(scopeRepo) : dashboard?.defaultRepo ? pathDir(dashboard.defaultRepo) : "";
+      setCloneParentDir(fallback);
+    }
+  }, [workspaceDialogOpen, cloneParentDir, scopeRepo, dashboard?.defaultRepo]);
 
   useEffect(() => {
     if (!activeRepo || !selectedDiffFile) {
@@ -328,6 +464,18 @@ export function App() {
       setStateError(error instanceof Error ? error.message : "Failed to load state");
     } finally {
       refreshingRef.current = false;
+    }
+  }
+
+  async function refreshGitHubStatus(): Promise<void> {
+    setGitHubLoading(true);
+    try {
+      const status = await fetchGitHubAuthStatus();
+      setGitHubAuth(status);
+    } catch {
+      setGitHubAuth(null);
+    } finally {
+      setGitHubLoading(false);
     }
   }
 
@@ -420,13 +568,40 @@ export function App() {
     setComposerRepo(run.repo);
     setComposerBranch(run.branchName || "");
     setComposerBaseBranch(run.baseBranch || "main");
+    setComposerWorktree(run.worktree);
+    setComposerOpenPr(run.openPr);
+    setComposerNoPush(false);
     setComposerMessage(`Continue from run ${run.runId}: `);
     setShowComposerAdvanced(true);
     composerRef.current?.focus();
   }
 
-  function toggleChatArchive(): void {
-    setArchivedChats({ ...archivedChats, [scopeKey]: !chatArchived });
+  function applySmartComposerDefaults(force = false): void {
+    const repo = (scopeRepo === "__all__" ? composerRepo : scopeRepo).trim();
+    if (!repo) return;
+
+    const inferred = inferComposerDefaults(composerMessage, repo, shortBranch(activeWorkspace?.branch));
+    if (force || !composerBranch.trim()) {
+      setComposerBranch(inferred.branchName);
+    }
+    if (force || !composerBaseBranch.trim() || composerBaseBranch === "main") {
+      setComposerBaseBranch(inferred.baseBranch);
+    }
+    if (force || composerMessage.trim().length > 6) {
+      setComposerWorktree(inferred.worktree);
+      setComposerOpenPr(inferred.openPr);
+      setComposerNoPush(inferred.noPush);
+    }
+  }
+
+  function toggleChatArchive(scope = scopeKey): void {
+    const next = { ...archivedChats };
+    if (next[scope]) {
+      delete next[scope];
+    } else {
+      next[scope] = true;
+    }
+    setArchivedChats(next);
   }
 
   function toggleRunArchive(runId: string): void {
@@ -443,6 +618,35 @@ export function App() {
     if (!activeRepo) return;
     setSelectedDiffFileByRepo({ ...selectedDiffFileByRepo, [activeRepo]: filePath });
   }
+
+  function applyQuickPrompt(prompt: string): void {
+    if (chatArchived) {
+      toggleChatArchive(scopeKey);
+    }
+    setComposerMessage(prompt);
+    setShowComposerAdvanced(true);
+    window.setTimeout(() => {
+      composerRef.current?.focus();
+      applySmartComposerDefaults(true);
+    }, 0);
+  }
+
+  useEffect(() => {
+    if (!composerMessage.trim()) return;
+    if (composerBranch.trim()) return;
+    const handle = window.setTimeout(() => {
+      applySmartComposerDefaults(false);
+    }, 220);
+    return () => window.clearTimeout(handle);
+  }, [composerMessage, composerRepo, scopeRepo, activeWorkspace?.branch]);
+
+  useEffect(() => {
+    if (!chatArchived) return;
+    if (scopedRuns.length > 0) return;
+    const next = { ...archivedChats };
+    delete next[scopeKey];
+    setArchivedChats(next);
+  }, [chatArchived, scopedRuns.length, archivedChats, scopeKey, setArchivedChats]);
 
   async function submitComposer(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -478,9 +682,9 @@ export function App() {
                 .filter(Boolean)
             }
           : {}),
-        worktree: true,
-        openPr: false,
-        noPush: false
+        worktree: composerWorktree,
+        openPr: composerOpenPr,
+        noPush: composerNoPush
       });
 
       if (!knownRepos.includes(repo)) {
@@ -491,6 +695,8 @@ export function App() {
       setExpandedRunIds(new Set([queued.run.runId]));
       setComposerMessage("");
       setComposerSpec("");
+      setComposerOpenPr(false);
+      setComposerNoPush(false);
       setNotice(`Queued run ${queued.run.runId}`);
       await refreshState();
       await refreshWorkspace(repo);
@@ -541,21 +747,81 @@ export function App() {
     setWorkspaceDialogOpen(false);
   }
 
-  const laneLabel = lanes.find((lane) => lane.id === activeLane)?.label || "All";
-  const layoutStyle = { "--sidebar-w": `${sidebarWidth}px` } as CSSProperties;
+  async function submitCloneWorkspace(): Promise<void> {
+    const url = cloneUrl.trim();
+    if (!url) {
+      setNotice("Clone URL is required.");
+      return;
+    }
+
+    setCloneSubmitting(true);
+    try {
+      const response = await cloneWorkspace(url, cloneParentDir.trim() || undefined, cloneName.trim() || undefined);
+      addWorkspace(response.repo);
+      setWorkspaceDialogOpen(false);
+      setCloneUrl("");
+      setCloneName("");
+      setNotice(`Cloned workspace ${repoName(response.repo)}`);
+      await refreshWorkspace(response.repo);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Failed to clone workspace");
+    } finally {
+      setCloneSubmitting(false);
+    }
+  }
+
+  async function pickWorkspaceFromFinder(): Promise<void> {
+    setBrowsePicking(true);
+    try {
+      const response = await pickWorkspacePath();
+      if (workspaceDialogTab === "local") {
+        setWorkspaceDraftPath(response.repo);
+      } else {
+        setCloneParentDir(response.repo);
+      }
+      setNotice(`Selected ${response.repo}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Failed to pick folder");
+    } finally {
+      setBrowsePicking(false);
+    }
+  }
+
+  async function disconnectGitHub(): Promise<void> {
+    try {
+      await logoutGitHubAuth();
+      await refreshGitHubStatus();
+      setNotice("Disconnected GitHub account");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Failed to disconnect GitHub");
+    }
+  }
+
+  function toggleThemeMode(): void {
+    const next = effectiveThemeMode === "dark" ? "light" : "dark";
+    setThemeMode(next);
+  }
+
+  const effectiveSidebarWidth = sidebarCollapsed ? 84 : sidebarWidth;
+  const layoutStyle = {
+    "--sidebar-w": `${effectiveSidebarWidth}px`,
+    "--sidebar-resizer-w": sidebarCollapsed ? "0px" : "8px"
+  } as CSSProperties;
 
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-background">
-      <div className="h-full md:grid md:grid-cols-[var(--sidebar-w)_8px_minmax(0,1fr)]" style={layoutStyle}>
+    <div className="relative h-screen w-full overflow-hidden bg-background text-foreground">
+      <div className="h-full md:grid md:grid-cols-[var(--sidebar-w)_var(--sidebar-resizer-w)_minmax(0,1fr)]" style={layoutStyle}>
         <div
           className={cn(
-            "fixed inset-y-0 left-0 z-40 w-[min(92vw,380px)] border-r bg-card transition-transform md:static md:w-auto md:translate-x-0",
+            "fixed inset-y-0 left-0 z-40 border-r bg-card transition-transform md:static md:w-auto md:translate-x-0",
+            sidebarCollapsed ? "w-[84px]" : "w-[min(92vw,380px)]",
             mobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
           )}
         >
           <Sidebar
             workspaces={knownRepos}
             runs={visibleRuns}
+            archivedChats={archivedChats}
             repoFilter={repoSearch}
             onRepoFilterChange={setRepoSearch}
             selectedScope={scopeRepo}
@@ -575,7 +841,9 @@ export function App() {
             }}
             collapsed={sidebarCollapsed}
             onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
+            onToggleChatArchive={toggleChatArchive}
             onAddWorkspace={() => {
+              setWorkspaceDialogTab("local");
               setWorkspaceDraftPath(scopeRepo !== "__all__" ? scopeRepo : "");
               setWorkspaceDialogOpen(true);
             }}
@@ -583,103 +851,108 @@ export function App() {
         </div>
 
         <div
-          className="hidden cursor-col-resize bg-gradient-to-b from-transparent via-border to-transparent md:block"
+          className={cn(
+            "hidden cursor-col-resize bg-gradient-to-b from-transparent via-border to-transparent md:block",
+            sidebarCollapsed && "pointer-events-none opacity-0"
+          )}
           onMouseDown={() => {
             if (!sidebarCollapsed) setResizingSidebar(true);
           }}
         />
 
         <main className="flex min-h-0 flex-col">
-          <header className="border-b bg-background/90 px-4 py-2.5 backdrop-blur">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" size="icon" className="md:hidden" onClick={() => setMobileSidebarOpen(true)}>
-                    <Menu className="h-4 w-4" />
-                  </Button>
-                  <h1 className="text-xl font-semibold tracking-tight">Run Chat</h1>
-                  <Badge variant="outline" className="hidden sm:inline-flex">
-                    {laneLabel}
-                  </Badge>
-                </div>
-                <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                  {(activeRepo ? repoName(activeRepo) : "No workspace")} · {shortBranch(activeWorkspace?.branch)} · {activeWorkspace?.remoteSlug || "-"} · {activeWorkspace?.gitUser || "-"}
+          <header className="border-b border-border/80 bg-background/92 px-4 py-2.5 backdrop-blur">
+            <div className="flex items-center gap-3">
+              <div className="min-w-0 flex flex-1 items-center gap-2">
+                <Button variant="outline" size="icon" className="md:hidden" onClick={() => setMobileSidebarOpen(true)}>
+                  <Menu className="h-4 w-4" />
+                </Button>
+                <h1 className="truncate text-[1.7rem] font-bold tracking-tight">{activeRepo ? repoName(activeRepo) : "All repositories"}</h1>
+                <p className="hidden truncate font-mono text-sm text-muted-foreground xl:block">
+                  {shortBranch(activeWorkspace?.branch)} · {activeWorkspace?.remoteSlug || "-"}
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <Select
-                  value={scopeRepo}
-                  onValueChange={(value) => {
-                    setScopeRepo(value);
-                    setActiveLane("all");
-                  }}
-                >
-                  <SelectTrigger className="w-[180px]">
-                    <SelectValue placeholder="Scope" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__all__">All repositories</SelectItem>
-                    {knownRepos.map((repo) => (
-                      <SelectItem key={repo} value={repo}>
-                        {repoName(repo)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div className="flex items-center gap-2 overflow-x-auto">
+              <Select
+                value={scopeRepo}
+                onValueChange={(value) => {
+                  setScopeRepo(value);
+                  setActiveLane("all");
+                }}
+              >
+                <SelectTrigger className="w-[190px]">
+                  <SelectValue placeholder="Scope" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All repositories</SelectItem>
+                  {knownRepos.map((repo) => (
+                    <SelectItem key={repo} value={repo}>
+                      {repoName(repo)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
 
+              <div className="flex shrink-0 items-center">
+                <Button
+                  variant="outline"
+                  className="rounded-r-none border-r-0"
+                  onClick={() => void openInTarget()}
+                  disabled={openingTarget}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  <span className="hidden sm:inline">{openingTarget ? "Working" : openTarget === "copy_path" ? "Copy path" : `Open in ${openTargetLabels[openTarget]}`}</span>
+                </Button>
                 <Select value={openTarget} onValueChange={(value) => setOpenTarget(value as WorkspaceOpenTarget)}>
-                  <SelectTrigger className="w-[156px]">
-                    <SelectValue placeholder="Open target" />
+                  <SelectTrigger className="h-9 w-10 rounded-l-none px-0 justify-center">
+                    <span className="sr-only">Select open target</span>
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="finder">Open in Finder</SelectItem>
-                    <SelectItem value="cursor">Open in Cursor</SelectItem>
-                    <SelectItem value="vscode">Open in VS Code</SelectItem>
-                    <SelectItem value="xcode">Open in Xcode</SelectItem>
-                    <SelectItem value="warp">Open in Warp</SelectItem>
-                    <SelectItem value="terminal">Open in Terminal</SelectItem>
+                    <SelectItem value="finder">Finder</SelectItem>
+                    <SelectItem value="cursor">Cursor</SelectItem>
+                    <SelectItem value="vscode">VS Code</SelectItem>
+                    <SelectItem value="xcode">Xcode</SelectItem>
+                    <SelectItem value="warp">Warp</SelectItem>
+                    <SelectItem value="terminal">Terminal</SelectItem>
                     <SelectItem value="copy_path">Copy path</SelectItem>
                   </SelectContent>
                 </Select>
-
-                <Button variant="outline" onClick={() => void openInTarget()} disabled={openingTarget}>
-                  <ExternalLink className="h-4 w-4" />
-                  <span className="hidden sm:inline">{openingTarget ? "Opening" : "Open"}</span>
-                </Button>
-
-                <Button variant="outline" onClick={toggleChatArchive}>
-                  <Archive className="h-4 w-4" />
-                  <span className="hidden sm:inline">{chatArchived ? "Reopen" : "Archive"}</span>
-                </Button>
-
-                <Button
-                  onClick={() => {
-                    if (chatArchived) {
-                      toggleChatArchive();
-                    }
-                    composerRef.current?.focus();
-                  }}
-                >
-                  <SquarePen className="h-4 w-4" />
-                  <span className="hidden sm:inline">New Run</span>
-                </Button>
               </div>
+
+              <Button variant="outline" size="icon" onClick={toggleThemeMode} title={`Switch to ${effectiveThemeMode === "dark" ? "light" : "dark"} theme`}>
+                {effectiveThemeMode === "dark" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
+              </Button>
+
+              {githubAuth?.connected ? (
+                <Button variant="outline" size="icon" onClick={() => void disconnectGitHub()} title={`Connected as ${githubAuth.user?.login || "GitHub"}. Click to disconnect.`}>
+                  <Github className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={startGitHubAuth}
+                  disabled={githubLoading || !githubAuth?.configured}
+                  title={githubAuth?.configured ? "Connect GitHub" : "GitHub not configured"}
+                >
+                  <Github className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
             </div>
           </header>
 
-          <section className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 xl:grid-cols-[minmax(0,1fr)_390px]">
-            <Card className="flex min-h-0 flex-col">
-              <CardHeader className="space-y-1 pb-3">
-                <CardTitle className="text-2xl leading-none tracking-tight">Chat Timeline</CardTitle>
-                <CardDescription>
-                  {laneLabel} lane, {filteredRuns.length} message(s)
-                </CardDescription>
-              </CardHeader>
+          <section className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_390px]">
+            <section className="flex min-h-0 flex-col rounded-xl border border-border/70 bg-card/60 p-3">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h2 className="text-[1.25rem] font-semibold tracking-tight">Timeline</h2>
+                <p className="text-xs text-muted-foreground">{filteredRuns.length} message(s)</p>
+              </div>
 
-              <CardContent className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] gap-3">
+              <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] gap-3">
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_180px_auto]">
-                  <Input value={runSearch} onChange={(event) => setRunSearch(event.currentTarget.value)} placeholder="Search runs by id, repo, branch, message..." />
+                  <Input value={runSearch} onChange={(event) => setRunSearch(event.currentTarget.value)} placeholder="Search by id, repo, branch, message..." />
 
                   <Select value={runSort} onValueChange={(value) => setRunSort(value as SortMode)}>
                     <SelectTrigger>
@@ -693,18 +966,32 @@ export function App() {
                     </SelectContent>
                   </Select>
 
-                  <label className="flex items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
+                  <label className="flex items-center gap-2 rounded-md px-2 text-xs text-muted-foreground">
                     <Checkbox checked={showArchivedRuns} onCheckedChange={(checked) => setShowArchivedRuns(checked === true)} />
                     show archived
                   </label>
                 </div>
 
-                <ScrollArea className="min-h-0 rounded-lg border bg-muted/20 p-2">
+                <ScrollArea className="min-h-0">
                   <div className="space-y-2">
                     {filteredRuns.length === 0 ? (
-                      <div className="rounded-lg border border-dashed bg-background p-5">
-                        <p className="text-sm font-medium">No runs yet in this chat lane</p>
-                        <p className="mt-1 text-xs text-muted-foreground">Send a message below to queue a new run.</p>
+                      <div className="flex min-h-[180px] items-center justify-center rounded-lg border border-dashed border-border/60 px-4 py-6">
+                        <div className="mx-auto max-w-xl text-center">
+                          <p className="text-lg font-semibold">No runs yet</p>
+                          <p className="mt-1 text-sm text-muted-foreground">Send a message below or start from a prompt.</p>
+                          <div className="mt-4 flex flex-wrap justify-center gap-2 text-left">
+                            {quickRunPrompts.map((prompt) => (
+                              <button
+                                key={prompt}
+                                type="button"
+                                onClick={() => applyQuickPrompt(prompt)}
+                                className="rounded-full border border-border/60 bg-background/60 px-3 py-1.5 text-sm text-foreground transition hover:bg-accent/40"
+                              >
+                                {prompt}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     ) : (
                       filteredRuns.map((run) => {
@@ -715,7 +1002,13 @@ export function App() {
                         const isArchived = archivedRuns[run.runId] === true;
 
                         return (
-                          <div key={run.runId} className={cn("overflow-hidden rounded-lg border bg-card", selectedRunId === run.runId && "border-primary/50")}> 
+                          <div
+                            key={run.runId}
+                            className={cn(
+                              "overflow-hidden rounded-lg border border-border/60 bg-background/55 transition",
+                              selectedRunId === run.runId ? "border-primary/40 bg-accent/20" : "hover:bg-muted/25"
+                            )}
+                          >
                             <button
                               type="button"
                               className="w-full px-3 py-3 text-left"
@@ -730,10 +1023,10 @@ export function App() {
                               <div className="flex items-start justify-between gap-2">
                                 <div>
                                   <p className="text-sm font-semibold leading-tight">{summary}</p>
-                                  <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                                  <p className="mt-1 font-mono text-xs text-muted-foreground">
                                     {repoName(run.repo)} | {run.branchName || run.baseBranch || "-"} | {run.runId}
                                   </p>
-                                  <p className="font-mono text-[11px] text-muted-foreground">updated {prettyTimestamp(run.updatedAt)}</p>
+                                  <p className="font-mono text-xs text-muted-foreground">updated {prettyTimestamp(run.updatedAt)}</p>
                                   {prUrl && (
                                     <p className="mt-1 text-xs">
                                       PR: {" "}
@@ -748,7 +1041,7 @@ export function App() {
                             </button>
 
                             {expanded && (
-                              <div className="border-t bg-muted/10 p-3">
+                              <div className="border-t border-border/60 bg-muted/10 p-3">
                                 <div className="mb-2 flex flex-wrap gap-2">
                                   <Button size="sm" variant="secondary" onClick={() => continueFromRun(run)}>
                                     <Undo2 className="h-3.5 w-3.5" />
@@ -808,7 +1101,7 @@ export function App() {
                   </div>
                 </ScrollArea>
 
-                <form onSubmit={(event) => void submitComposer(event)} className="space-y-2 rounded-lg border bg-background p-3">
+                <form onSubmit={(event) => void submitComposer(event)} className="space-y-2 border-t border-border/70 pt-3">
                   {chatArchived ? (
                     <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       This chat is archived. Reopen chat to send another run message.
@@ -816,27 +1109,65 @@ export function App() {
                   ) : (
                     <>
                       {scopeRepo === "__all__" && (
-                        <Input value={composerRepo} onChange={(event) => setComposerRepo(event.currentTarget.value)} placeholder="/absolute/path/to/workspace" />
+                        <Input
+                          value={composerRepo}
+                          onChange={(event) => setComposerRepo(event.currentTarget.value)}
+                          placeholder="/absolute/path/to/workspace"
+                          className="h-10 text-sm"
+                        />
                       )}
 
                       <Textarea
                         ref={composerRef}
                         value={composerMessage}
                         onChange={(event) => setComposerMessage(event.currentTarget.value)}
-                        placeholder="Describe the feature/task for this run..."
+                        placeholder="Describe what this run should do..."
+                        className="min-h-[90px] text-base"
                       />
 
                       {showComposerAdvanced && (
-                        <div className="grid gap-2 md:grid-cols-2">
-                          <Input value={composerSpec} onChange={(event) => setComposerSpec(event.currentTarget.value)} placeholder="spec file (optional)" />
-                          <Input value={composerBaseBranch} onChange={(event) => setComposerBaseBranch(event.currentTarget.value)} placeholder="base branch" />
-                          <Input value={composerBranch} onChange={(event) => setComposerBranch(event.currentTarget.value)} placeholder="worktree branch name" />
-                          <Input value={composerLoopArgs} onChange={(event) => setComposerLoopArgs(event.currentTarget.value)} placeholder="extra loop args" />
+                        <div className="space-y-2 rounded-md bg-muted/20 p-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs text-muted-foreground">Smart defaults infer branch, worktree, and PR.</p>
+                            <Button type="button" variant="ghost" size="sm" onClick={() => applySmartComposerDefaults(true)}>
+                              Auto-fill
+                            </Button>
+                          </div>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <Input value={composerSpec} onChange={(event) => setComposerSpec(event.currentTarget.value)} placeholder="spec file (optional)" />
+                            <Input value={composerBaseBranch} onChange={(event) => setComposerBaseBranch(event.currentTarget.value)} placeholder="base branch" />
+                            <Input value={composerBranch} onChange={(event) => setComposerBranch(event.currentTarget.value)} placeholder="worktree branch name" />
+                            <Input value={composerLoopArgs} onChange={(event) => setComposerLoopArgs(event.currentTarget.value)} placeholder="extra loop args" />
+                          </div>
+                          <div className="flex flex-wrap items-center gap-4 text-sm">
+                            <label className="flex items-center gap-2 text-muted-foreground">
+                              <Checkbox checked={composerWorktree} onCheckedChange={(checked) => setComposerWorktree(checked === true)} />
+                              worktree
+                            </label>
+                            <label className="flex items-center gap-2 text-muted-foreground">
+                              <Checkbox checked={composerOpenPr} onCheckedChange={(checked) => setComposerOpenPr(checked === true)} />
+                              open PR
+                            </label>
+                            <label className="flex items-center gap-2 text-muted-foreground">
+                              <Checkbox checked={composerNoPush} onCheckedChange={(checked) => setComposerNoPush(checked === true)} />
+                              no push
+                            </label>
+                          </div>
                         </div>
                       )}
 
                       <div className="flex items-center justify-between">
-                        <Button type="button" variant="secondary" onClick={() => setShowComposerAdvanced((value) => !value)}>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          onClick={() => {
+                            const next = !showComposerAdvanced;
+                            setShowComposerAdvanced(next);
+                            if (next) {
+                              applySmartComposerDefaults(false);
+                            }
+                          }}
+                        >
                           {showComposerAdvanced ? "Hide Advanced" : "Advanced"}
                         </Button>
 
@@ -848,30 +1179,27 @@ export function App() {
                     </>
                   )}
                 </form>
-              </CardContent>
-            </Card>
+              </div>
+            </section>
 
-            <Card className="min-h-0">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-2xl leading-none tracking-tight">Workspace</CardTitle>
-                <CardDescription>{activeRepo || "Select a workspace"}</CardDescription>
-              </CardHeader>
+            <section className="hidden min-h-0 rounded-xl border border-border/70 bg-card/60 p-3 2xl:block">
+              <div className="mb-3">
+                <h2 className="text-[1.4rem] font-semibold tracking-tight">Workspace</h2>
+                <p className="truncate text-xs text-muted-foreground">{activeRepo || "Select a workspace"}</p>
+              </div>
 
-              <CardContent className="min-h-0">
-                <Tabs value={sidePanelTab} onValueChange={(value) => setSidePanelTab(value as SidePanelTab)} className="flex h-full min-h-0 flex-col gap-2">
-                  <TabsList className="grid w-full grid-cols-3">
+              <Tabs value={sidePanelTab} onValueChange={(value) => setSidePanelTab(value as SidePanelTab)} className="flex h-full min-h-0 flex-col gap-2">
+                  <TabsList className={cn("grid w-full", canInspect ? "grid-cols-3" : "grid-cols-2")}>
                     <TabsTrigger value="files">Files</TabsTrigger>
                     <TabsTrigger value="diff">Diff</TabsTrigger>
-                    <TabsTrigger value="inspector" disabled={!canInspect}>
-                      Inspector
-                    </TabsTrigger>
+                    {canInspect && <TabsTrigger value="inspector">Inspector</TabsTrigger>}
                   </TabsList>
 
                   <TabsContent value="files" className="mt-0 min-h-0 flex-1">
-                    <div className="flex h-full min-h-0 flex-col rounded-lg border p-3">
+                    <div className="flex h-full min-h-0 flex-col">
                       <p className="text-sm font-semibold">Changed files</p>
-                      <p className="mt-1 font-mono text-[11px] text-muted-foreground">branch {shortBranch(activeWorkspace?.branch)}</p>
-                      <p className="font-mono text-[11px] text-muted-foreground">
+                      <p className="mt-1 font-mono text-xs text-muted-foreground">branch {shortBranch(activeWorkspace?.branch)}</p>
+                      <p className="font-mono text-xs text-muted-foreground">
                         {workspaceLoading ? "Refreshing workspace..." : `${activeWorkspace?.changedFiles.length || 0} file(s)`}
                       </p>
                       {workspaceError && <p className="mt-1 text-xs text-destructive">{workspaceError}</p>}
@@ -888,10 +1216,7 @@ export function App() {
                                 selectDiffFile(file.path);
                                 setSidePanelTab("diff");
                               }}
-                              className={cn(
-                                "w-full rounded-md border px-2 py-2 text-left font-mono text-xs transition",
-                                selectedDiffFile === file.path ? "border-primary/50 bg-accent" : "border-border bg-background hover:bg-muted"
-                              )}
+                              className={cn("w-full rounded-md px-2 py-2 text-left font-mono text-xs transition", selectedDiffFile === file.path ? "bg-accent" : "hover:bg-muted")}
                             >
                               <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
                                 <span className="text-muted-foreground">{file.status}</span>
@@ -906,7 +1231,7 @@ export function App() {
                   </TabsContent>
 
                   <TabsContent value="diff" className="mt-0 min-h-0 flex-1">
-                    <div className="flex h-full min-h-0 flex-col rounded-lg border p-3">
+                    <div className="flex h-full min-h-0 flex-col">
                       <p className="text-sm font-semibold">Diff {selectedDiffFile ? `- ${selectedDiffFile}` : ""}</p>
                       <Separator className="my-3" />
                       {!selectedDiffFile ? (
@@ -921,7 +1246,7 @@ export function App() {
 
                   <TabsContent value="inspector" className="mt-0 min-h-0 flex-1">
                     {!selectedRun ? (
-                      <div className="rounded-lg border p-3">
+                      <div className="rounded-lg border bg-background p-3">
                         <p className="text-sm font-semibold">No run selected</p>
                         <p className="mt-1 text-xs text-muted-foreground">Select a run from chat timeline to inspect execution details.</p>
                       </div>
@@ -938,26 +1263,26 @@ export function App() {
                         <TabsContent value="summary" className="mt-0 space-y-2">
                           <div className="rounded-lg border p-3">
                             <p className="text-sm font-semibold">{compactText(runSummary(selectedRun), 100)}</p>
-                            <p className="mt-1 font-mono text-[11px] text-muted-foreground">repo {selectedRun.repo}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">branch {selectedRun.branchName || "-"} | base {selectedRun.baseBranch || "-"}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">updated {prettyTimestamp(selectedRun.updatedAt)}</p>
+                            <p className="mt-1 font-mono text-xs text-muted-foreground">repo {selectedRun.repo}</p>
+                            <p className="font-mono text-xs text-muted-foreground">branch {selectedRun.branchName || "-"} | base {selectedRun.baseBranch || "-"}</p>
+                            <p className="font-mono text-xs text-muted-foreground">updated {prettyTimestamp(selectedRun.updatedAt)}</p>
                           </div>
 
                           <div className="grid grid-cols-2 gap-2">
                             <div className="rounded-lg border bg-muted/30 p-2">
-                              <p className="text-[10px] uppercase text-muted-foreground">Queue</p>
+                              <p className="text-xs uppercase text-muted-foreground">Queue</p>
                               <p className="text-2xl font-semibold leading-none">{dashboard?.forge.queue.length ?? 0}</p>
                             </div>
                             <div className="rounded-lg border bg-muted/30 p-2">
-                              <p className="text-[10px] uppercase text-muted-foreground">Tokens</p>
+                              <p className="text-xs uppercase text-muted-foreground">Tokens</p>
                               <p className="text-2xl font-semibold leading-none">{formatInt(dashboard?.snapshot.metrics?.totalTokens)}</p>
                             </div>
                             <div className="rounded-lg border bg-muted/30 p-2">
-                              <p className="text-[10px] uppercase text-muted-foreground">Cost</p>
+                              <p className="text-xs uppercase text-muted-foreground">Cost</p>
                               <p className="text-2xl font-semibold leading-none">{formatUsd(dashboard?.snapshot.metrics?.estimatedCostUsd)}</p>
                             </div>
                             <div className="rounded-lg border bg-muted/30 p-2">
-                              <p className="text-[10px] uppercase text-muted-foreground">Audit</p>
+                              <p className="text-xs uppercase text-muted-foreground">Audit</p>
                               <p className="text-2xl font-semibold leading-none">{dashboard?.snapshot.metrics?.latestAuditScore ?? "-"}</p>
                             </div>
                           </div>
@@ -974,7 +1299,7 @@ export function App() {
                               <div className="space-y-2 pr-2">
                                 {(selectedRunDetails?.events || []).slice(0, 150).map((event) => (
                                   <div key={event.id} className="rounded-md border bg-muted/20 p-2">
-                                    <p className="font-mono text-[10px] text-muted-foreground">{prettyTimestamp(event.createdAt)} | {event.level}</p>
+                                    <p className="font-mono text-xs text-muted-foreground">{prettyTimestamp(event.createdAt)} | {event.level}</p>
                                     <p className="mt-1 text-xs whitespace-pre-wrap break-words">{event.message}</p>
                                   </div>
                                 ))}
@@ -996,19 +1321,18 @@ export function App() {
                         <TabsContent value="meta" className="mt-0">
                           <div className="rounded-lg border p-3">
                             <p className="text-sm font-semibold">Metadata</p>
-                            <p className="mt-2 font-mono text-[11px] text-muted-foreground">run id {selectedRun.runId}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">status {selectedRun.status}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">worktree {String(selectedRun.worktree)}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">open_pr {String(selectedRun.openPr)}</p>
-                            <p className="font-mono text-[11px] text-muted-foreground">run dir {selectedRun.runDir}</p>
+                            <p className="mt-2 font-mono text-xs text-muted-foreground">run id {selectedRun.runId}</p>
+                            <p className="font-mono text-xs text-muted-foreground">status {selectedRun.status}</p>
+                            <p className="font-mono text-xs text-muted-foreground">worktree {String(selectedRun.worktree)}</p>
+                            <p className="font-mono text-xs text-muted-foreground">open_pr {String(selectedRun.openPr)}</p>
+                            <p className="font-mono text-xs text-muted-foreground">run dir {selectedRun.runDir}</p>
                           </div>
                         </TabsContent>
                       </Tabs>
                     )}
                   </TabsContent>
                 </Tabs>
-              </CardContent>
-            </Card>
+            </section>
           </section>
         </main>
       </div>
@@ -1017,23 +1341,97 @@ export function App() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Workspace</DialogTitle>
-            <DialogDescription>Add any local repository path to track its runs and status lanes.</DialogDescription>
+            <DialogDescription>Use a local path, clone from URL, or pick a folder in Finder.</DialogDescription>
           </DialogHeader>
 
-          <div className="mt-4 space-y-2">
-            <Input
-              value={workspaceDraftPath}
-              onChange={(event) => setWorkspaceDraftPath(event.currentTarget.value)}
-              placeholder="/Users/you/code/my-repo"
-            />
-          </div>
+          <Tabs value={workspaceDialogTab} onValueChange={(value) => setWorkspaceDialogTab(value as WorkspaceDialogTab)} className="mt-4">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="local">Local</TabsTrigger>
+              <TabsTrigger value="clone">Clone URL</TabsTrigger>
+              <TabsTrigger value="browse">Browse</TabsTrigger>
+            </TabsList>
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setWorkspaceDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={submitWorkspaceDialog}>Add Workspace</Button>
-          </DialogFooter>
+            <TabsContent value="local" className="mt-3 space-y-2">
+              <Input
+                list="workspace-suggestions"
+                value={workspaceDraftPath}
+                onChange={(event) => setWorkspaceDraftPath(event.currentTarget.value)}
+                placeholder="/Users/you/code/my-repo"
+              />
+              <datalist id="workspace-suggestions">
+                {workspaceSuggestions.map((suggestion) => (
+                  <option key={suggestion} value={suggestion} />
+                ))}
+              </datalist>
+
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>{workspaceSuggestionsLoading ? "Searching paths..." : `${workspaceSuggestions.length} suggestion(s)`}</span>
+                <Button type="button" variant="ghost" size="sm" onClick={() => void pickWorkspaceFromFinder()} disabled={browsePicking}>
+                  <FolderSearch className="h-3.5 w-3.5" />
+                  {browsePicking ? "Picking..." : "Browse Finder"}
+                </Button>
+              </div>
+
+              {!!knownRepos.length && (
+                <div className="flex flex-wrap gap-1.5">
+                  {knownRepos.slice(0, 5).map((repo) => (
+                    <button
+                      key={repo}
+                      type="button"
+                      className="rounded-full border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+                      onClick={() => setWorkspaceDraftPath(repo)}
+                    >
+                      {repoName(repo)}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setWorkspaceDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={submitWorkspaceDialog}>Add Workspace</Button>
+              </DialogFooter>
+            </TabsContent>
+
+            <TabsContent value="clone" className="mt-3 space-y-2">
+              <Input value={cloneUrl} onChange={(event) => setCloneUrl(event.currentTarget.value)} placeholder="https://github.com/org/repo.git" />
+              <div className="flex gap-2">
+                <Input value={cloneParentDir} onChange={(event) => setCloneParentDir(event.currentTarget.value)} placeholder="clone destination folder" />
+                <Button type="button" variant="outline" onClick={() => void pickWorkspaceFromFinder()} disabled={browsePicking}>
+                  <FolderSearch className="h-4 w-4" />
+                </Button>
+              </div>
+              <Input value={cloneName} onChange={(event) => setCloneName(event.currentTarget.value)} placeholder="folder name (optional)" />
+              <div className="rounded-md bg-muted/50 px-2 py-1 font-mono text-xs text-muted-foreground">
+                target: {(cloneParentDir || "<destination>").replace(/\/$/, "")}/{cloneName || normalizeCloneName(cloneUrl) || "<repo>"}
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setWorkspaceDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={() => void submitCloneWorkspace()} disabled={cloneSubmitting}>
+                  <GitFork className="h-4 w-4" />
+                  {cloneSubmitting ? "Cloning..." : "Clone + Add"}
+                </Button>
+              </DialogFooter>
+            </TabsContent>
+
+            <TabsContent value="browse" className="mt-3 space-y-2">
+              <p className="text-sm text-muted-foreground">Pick a folder from Finder, then add it as a workspace.</p>
+              <Input value={workspaceDraftPath} onChange={(event) => setWorkspaceDraftPath(event.currentTarget.value)} placeholder="picked folder path" />
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => void pickWorkspaceFromFinder()} disabled={browsePicking}>
+                  <FolderSearch className="h-4 w-4" />
+                  {browsePicking ? "Picking..." : "Pick Folder"}
+                </Button>
+                <Button onClick={submitWorkspaceDialog}>Add Picked Folder</Button>
+              </DialogFooter>
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
 

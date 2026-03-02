@@ -41,11 +41,13 @@ Spec-driven run:
 - `packages/event-ingestor`
   - parser/scanner for `.ralph` artifacts (`turn-*.last.txt`, `turn-*.stdout.log`, `turn-*.audit.last.txt`).
 - `apps/dashboard`
-  - realtime dashboard with:
-    - run summary cards
-    - turn/audit tables
-    - latest audit axis score grid
-    - DAG visualization (`repo -> turn -> audit -> next turn`)
+  - Ralph Forge dashboard (chat-first orchestration UI) with:
+    - workspace-aware run chat timeline
+    - queue/send run composer with smart defaults
+    - run actions (pause/resume/abort/retry/delete/archive)
+    - workspace tooling (changed files, diff, open-in target, clone/pick/suggest)
+    - optional GitHub OAuth connect/logout for PR-linked workflows
+    - responsive layout (workspace side panel on ultra-wide screens)
 
 ## Install
 ```bash
@@ -62,6 +64,16 @@ The dashboard product surface is called **Ralph Forge**.
 V3 architecture and execution blueprint:
 - `docs/forge-v3-blueprint.md`
 
+Frontend-only dev loop (faster UI iteration):
+```bash
+npm run -w @ralph/dashboard dev:ui
+```
+
+Full dashboard package scripts:
+- `npm run -w @ralph/dashboard dev`
+- `npm run -w @ralph/dashboard start`
+- `npm run -w @ralph/dashboard lint`
+
 Optional token pricing flags (for live/post-run cost estimates):
 ```bash
 npm run dev:dashboard -- --target ~/code/superkabal --port 4310 \
@@ -76,10 +88,25 @@ Open:
 
 Forge orchestration APIs (used by the Run Launcher UI):
 - `POST /api/forge/runs`
+- `GET /api/forge/runs`
+- `GET /api/forge/runs/:runId`
 - `POST /api/forge/runs/:runId/pause`
 - `POST /api/forge/runs/:runId/resume`
 - `POST /api/forge/runs/:runId/abort`
 - `POST /api/forge/runs/:runId/retry`
+- `DELETE /api/forge/runs/:runId`
+
+Workspace/GitHub APIs:
+- `GET /api/workspace`
+- `GET /api/workspace/diff`
+- `POST /api/workspace/open`
+- `GET /api/workspace/suggest`
+- `POST /api/workspace/pick` (macOS folder picker)
+- `POST /api/workspace/clone`
+- `GET /api/auth/github`
+- `GET /api/auth/github/start`
+- `GET /api/auth/github/callback`
+- `POST /api/auth/github/logout`
 
 ## Run loop CLI
 ```bash

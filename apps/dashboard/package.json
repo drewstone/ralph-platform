@@ -4,9 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "npm run build:ui && npm run dev:server",
+    "dev:server": "tsx watch src/server.ts",
     "dev:ui": "vite --config frontend/vite.config.ts",
-    "start": "tsx src/server.ts",
+    "start": "npm run build:ui && tsx src/server.ts",
     "build:server": "tsc -p tsconfig.json",
     "build:ui": "vite build --config frontend/vite.config.ts",
     "build": "npm run build:server && npm run build:ui",

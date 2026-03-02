@@ -97,4 +97,16 @@ export interface WorkspaceSnapshot {
   gitUser?: string;
 }
 
+export interface GitHubAuthStatus {
+  configured: boolean;
+  connected: boolean;
+  callbackUrl: string;
+  user?: {
+    login?: string;
+    name?: string;
+    avatarUrl?: string;
+    htmlUrl?: string;
+  };
+}
+
 export type WorkspaceOpenTarget = "finder" | "cursor" | "vscode" | "xcode" | "warp" | "terminal" | "copy_path";

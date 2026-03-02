@@ -4,26 +4,48 @@
 
 @layer base {
   :root {
-    --background: 210 20% 98%;
-    --foreground: 224 33% 12%;
+    --background: 208 34% 96%;
+    --foreground: 222 41% 14%;
     --card: 0 0% 100%;
-    --card-foreground: 224 33% 12%;
+    --card-foreground: 222 41% 14%;
     --popover: 0 0% 100%;
-    --popover-foreground: 224 33% 12%;
-    --primary: 164 73% 27%;
-    --primary-foreground: 160 65% 96%;
-    --secondary: 214 32% 93%;
-    --secondary-foreground: 223 24% 24%;
-    --muted: 214 25% 95%;
-    --muted-foreground: 221 15% 46%;
-    --accent: 160 46% 90%;
-    --accent-foreground: 165 60% 20%;
+    --popover-foreground: 222 41% 14%;
+    --primary: 163 74% 32%;
+    --primary-foreground: 162 78% 97%;
+    --secondary: 210 30% 90%;
+    --secondary-foreground: 221 27% 24%;
+    --muted: 211 26% 91%;
+    --muted-foreground: 221 20% 34%;
+    --accent: 160 52% 86%;
+    --accent-foreground: 164 62% 20%;
     --destructive: 5 72% 56%;
     --destructive-foreground: 0 0% 98%;
-    --border: 215 24% 86%;
-    --input: 215 24% 86%;
-    --ring: 164 73% 27%;
+    --border: 214 25% 78%;
+    --input: 214 25% 78%;
+    --ring: 163 74% 32%;
     --radius: 0.7rem;
+  }
+
+  .dark {
+    --background: 221 27% 9%;
+    --foreground: 211 42% 95%;
+    --card: 220 24% 12%;
+    --card-foreground: 211 42% 95%;
+    --popover: 220 24% 12%;
+    --popover-foreground: 211 42% 95%;
+    --primary: 160 84% 42%;
+    --primary-foreground: 168 92% 9%;
+    --secondary: 221 21% 19%;
+    --secondary-foreground: 210 38% 92%;
+    --muted: 221 20% 18%;
+    --muted-foreground: 213 22% 82%;
+    --accent: 162 44% 23%;
+    --accent-foreground: 161 70% 93%;
+    --destructive: 0 75% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 20% 30%;
+    --input: 220 20% 30%;
+    --ring: 160 84% 42%;
   }
 
   * {
@@ -40,7 +62,18 @@
   body {
     @apply bg-background text-foreground antialiased;
     margin: 0;
+    font-size: 16px;
+    line-height: 1.45;
     font-family: "Inter", "Manrope", "SF Pro Display", "Segoe UI", sans-serif;
+    background-image:
+      radial-gradient(1200px 520px at 100% -10%, hsl(164 70% 84% / 0.28), transparent 52%),
+      radial-gradient(1000px 460px at -10% 0%, hsl(210 68% 85% / 0.28), transparent 50%);
+  }
+
+  .dark body {
+    background-image:
+      radial-gradient(1200px 520px at 100% -8%, hsl(163 76% 36% / 0.22), transparent 52%),
+      radial-gradient(1000px 460px at -10% -8%, hsl(218 62% 22% / 0.3), transparent 55%);
   }
 
   code,
